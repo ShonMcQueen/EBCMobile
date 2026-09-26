@@ -2,7 +2,7 @@
 // Мобильный ЕБЦ — этап 1: поиск, карточка ЭО, транзит, загрузка базы.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.0';
+const VERSION = '1.1';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------
@@ -114,17 +114,26 @@ function buildIndex(m) {
     e.recvCount = new Set(e.receivers.map(l => (l.recv ? l.recv.id : 'row' + l.giverRow))).size;
     e.giverList = [...new Map(e.givers.map(l => [l.giver.id, l.giver])).values()];
     e.nName = norm(e.name);
-    e.hay = ' ' + norm([e.name, e.inn, e.contract, e.id, e.meters.map(x => x.num).join(' '), e.fact, e.tus.join(' ')].join(' ')) + ' ';
+    e.addr = ' ' + normQ([e.fact, e.tus.join(' ')].join(' ')) + ' ';
+    e.hay = ' ' + normQ([e.name, e.inn, e.contract, e.id, e.meters.map(x => x.num).join(' ')].join(' ')) + e.addr;
   }
   return { eos, byId, rowEo, roleOf, meterOf, tuOf, col, links };
 }
 
 // ---------- поиск ----------
-function tokensOf(q) { return norm(q).split(' ').filter(Boolean); }
+// Нормализация для поиска: «Красноармейская7» → «красноармейская 7», «7 А» → «7а».
+function normQ(v) {
+  return norm(v)
+    .replace(/([a-zа-я]{2,})(\d)/g, '$1 $2')
+    .replace(/(^| )(\d{1,3}) ([абвгдежз])(?= |$)/g, '$1$2$3');
+}
+function tokensOf(q) { return normQ(q).split(' ').filter(Boolean); }
 
-function tokenHit(hay, t) {
-  // Короткие числа (дом «12») ищем только с начала слова, длинные — где угодно (часть номера).
-  return (/^\d+$/.test(t) && t.length < 4) ? hay.includes(' ' + t) : hay.includes(t);
+// Короткий номер (дом, строение, корпус): 7, 12, 7а. Ищется только в адресе и только целиком.
+const isHouse = t => /^\d{1,3}[а-я]?$/.test(t);
+const reEsc = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function houseRe(t) {
+  return new RegExp(' ' + reEsc(t) + (/[а-я]$/.test(t) ? '(?![0-9а-я])' : '(?![0-9])'));
 }
 
 function search(q) {
@@ -132,13 +141,24 @@ function search(q) {
   if (!toks.length) return [];
   const nq = toks.join(' ');
   const single = toks.length === 1 ? toks[0] : null;
+  const houses = toks.filter(isHouse);
+  const words = toks.filter(t => !isHouse(t) && !/^\d+$/.test(t) && t.length >= 3);
+  const plain = toks.filter(t => !isHouse(t));
+  const hRe = houses.map(houseRe);
+  // «улица … дом»: номер идёт сразу за названием улицы (между ними могут стоять «д», «дом», «ул» и т.п.)
+  const pairRe = [];
+  for (const w of words) for (const h of houses) {
+    const base = reEsc(w) + '[а-я]*(?: [а-я]{1,6}){0,2} ' + reEsc(h);
+    pairRe.push([new RegExp(base + '(?![0-9а-я])'), new RegExp(base + '(?![0-9])')]);
+  }
   const res = [];
   for (const e of X.eos) {
     let ok = true;
-    for (const t of toks) if (!tokenHit(e.hay, t)) { ok = false; break; }
+    for (const t of plain) if (!e.hay.includes(t)) { ok = false; break; }
+    if (ok) for (const r of hRe) if (!r.test(e.addr)) { ok = false; break; }
     if (!ok) continue;
     let score = 0, why = '';
-    if (single && /\d/.test(single)) {
+    if (single && /\d/.test(single) && !isHouse(single)) {
       const checks = [['№ ПУ', e.meters.map(m => m.num)], ['договор', [e.contract]], ['ЭО', [e.id]], ['ИНН', [e.inn]]];
       for (const [label, vals] of checks) {
         for (const v of vals) {
@@ -149,6 +169,10 @@ function search(q) {
           else if (nv.includes(single)) { score = Math.max(score, 30); why = why || label; }
         }
       }
+    }
+    for (const [exact, loose] of pairRe) {
+      if (exact.test(e.addr)) { score += 50; break; }
+      if (loose.test(e.addr)) { score += 35; break; }
     }
     if (e.nName.startsWith(nq)) score += 20; else if (e.nName.includes(nq)) score += 10;
     res.push({ e, score, why });
@@ -161,8 +185,8 @@ function highlight(text, toks) {
   const s = esc(text);
   if (!toks || !toks.length) return s;
   const parts = toks.map(t => {
-    const p = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/е/g, '[её]');
-    return (/^\d+$/.test(t) && t.length < 4) ? '(?<![0-9])' + p : p;
+    const p = reEsc(t).replace(/е/g, '[её]');
+    return isHouse(t) ? '(?<![0-9])' + p + '(?![0-9])' : p;
   });
   try { return s.replace(new RegExp('(' + parts.join('|') + ')', 'gi'), '<mark>$1</mark>'); }
   catch { return s; }
@@ -304,11 +328,15 @@ function rowHtml({ e, why }, toks) {
   if (single) meters = [...meters].sort((a, b) => (norm(b.num).includes(single) ? 1 : 0) - (norm(a.num).includes(single) ? 1 : 0));
   const pus = meters.slice(0, MAXPU).map(m => `<div class="pu${single && norm(m.num).includes(single) ? ' hit' : ''}"><span>№ ${highlight(m.num, toks)}</span>${roleBadge(m.role)}</div>`).join('');
   const morePu = nm > MAXPU ? `<div class="pu" style="color:var(--muted)">ещё ${nm - MAXPU} ПУ</div>` : '';
-  const addr = e.fact || e.tus[0] || '';
+  // показываем тот адрес, где нашлось совпадение (фактический или ТУ)
+  const addrs = [e.fact, ...e.tus].filter(Boolean);
+  const fits = a => { const n = ' ' + normQ(a) + ' '; return toks.every(t => (isHouse(t) ? houseRe(t).test(n) : n.includes(t))); };
+  const addr = addrs.find(fits) || addrs.find(a => toks.some(t => !isHouse(t) && (' ' + normQ(a)).includes(t))) || addrs[0] || '';
+  const addrLabel = addr && addr !== e.fact ? 'Адрес ТУ: ' : '';
   const whyLine = why === 'ИНН' ? `<div class="why">совпало: ИНН ${highlight(e.inn, toks)}</div>` : '';
   return `<button class="row" data-id="${esc(e.id)}">
     <div class="r1"><div class="name">${highlight(e.name, toks)}</div>${badge}</div>
-    <div class="meta">Договор ${highlight(e.contract || '—', toks)}<br>ЭО ${highlight(e.id, toks)}${addr ? '<br>' + highlight(addr, toks) : ''}</div>
+    <div class="meta">Договор ${highlight(e.contract || '—', toks)}<br>ЭО ${highlight(e.id, toks)}${addr ? '<br>' + addrLabel + highlight(addr, toks) : ''}</div>
     ${whyLine}
     ${nm ? `<div class="pus">${pus}${morePu}</div>` : ''}
     ${transitChips(e)}
