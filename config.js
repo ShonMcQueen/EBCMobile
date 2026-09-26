@@ -4,7 +4,7 @@ window.APP_CONFIG = {
   // Публичная ссылка на ПАПКУ на Яндекс Диске, где лежит zip с базой.
   // Пример: 'https://disk.yandex.ru/d/AbCdEf123456'
   // Пока пусто — кнопка «Скачать с Яндекс Диска» будет неактивна.
-  yandexFolderUrl: '',
+  yandexFolderUrl: 'https://disk.yandex.ru/d/LooZ7H_Zhxf_dQ',
 
   // Через сколько дней после загрузки базы показывать напоминание «пора обновить».
   staleDays: 35
