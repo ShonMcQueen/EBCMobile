@@ -2,7 +2,7 @@
 // Мобильный ЕБЦ — этап 1: поиск, карточка ЭО, транзит, загрузка базы.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.2';
+const VERSION = '1.3';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------
@@ -213,9 +213,10 @@ function roleBadge(role) {
 
 function transitChips(e) {
   let h = '';
-  if (e.recvCount) h += `<span class="trl">Есть транзитоприёмники: ${e.recvCount}</span>`;
-  if (e.giverList.length === 1) h += `<span class="trl">Транзитодатель: ${esc(e.giverList[0].name)}</span>`;
-  else if (e.giverList.length > 1) h += `<span class="trl">Транзитодателей: ${e.giverList.length}</span>`;
+  // голубая плашка — про транзитодателя, оранжевая — про транзитоприёмников
+  if (e.recvCount) h += `<span class="trl recv">Есть транзитоприёмники: ${e.recvCount}</span>`;
+  if (e.giverList.length === 1) h += `<span class="trl giver">Транзитодатель: ${esc(e.giverList[0].name)}</span>`;
+  else if (e.giverList.length > 1) h += `<span class="trl giver">Транзитодателей: ${e.giverList.length}</span>`;
   return h;
 }
 
@@ -227,7 +228,6 @@ function renderHome() {
   setBar(`<div class="t">Мобильный ЕБЦ</div><button class="ib" id="toData" aria-label="База данных">${ICON.gear}</button>`);
   $('#toData').onclick = () => go('#/data');
   $('#view').innerHTML = `
-    <div id="homeTop"><div class="hello">Кого или что<br>ищем?</div></div>
     <label class="search" id="sbox">${ICON.search}
       <input id="q" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" placeholder="Договор, ЭО, счётчик, адрес, ИНН, абонент">
       <button class="clear" id="clr" aria-label="Очистить">${ICON.close}</button></label>
@@ -271,7 +271,6 @@ function updateResults(q, restoring) {
   const box = $('#results'), has = !!q.trim();
   $('#sbox').classList.toggle('has', has);
   $('#sbox').classList.toggle('compact', has);
-  $('#homeTop').hidden = has;
   if (!has) { $('#homeExtra').hidden = false; renderHomeExtra(); box.innerHTML = ''; return; }
   $('#homeExtra').hidden = true;
   if (q !== lastQ) {
@@ -397,6 +396,8 @@ function renderCard(id) {
   if (e.fact) secHtml.object.unshift(field('Фактический адрес', e.fact, true));
   if (e.tus.length) secHtml.object.push(field(e.tus.length > 1 ? 'Адреса точек учёта' : 'Адрес точки учёта', e.tus.join(' / '), true));
 
+  const trRows = e.rows.filter(ri => X.roleOf(rows[ri]) === 'T');
+  const ownRows = e.rows.filter(ri => X.roleOf(rows[ri]) !== 'T');
   const acc = (title, body, open) => body ? `<details class="acc"${open ? ' open' : ''}><summary>${title}${ICON.chev}</summary>${body}</details>` : '';
   const kv = arr => arr.length ? `<div class="kv">${arr.join('')}</div>` : '';
 
@@ -408,10 +409,17 @@ function renderCard(id) {
     </div>
     ${acc('Договор и потребитель', kv(secHtml.contract))}
     ${acc('Энергообъект', kv(secHtml.object), true)}
-    ${acc(`Приборы учёта (${e.rows.length})`, '<div id="meters"></div>', true)}
+    ${trRows.length
+      ? acc(`Приборы учёта (${ownRows.length})`, '<div id="meters"></div>', true) +
+        acc(`ПУ транзитоприёмников (${trRows.length})`, '<div id="trmeters"></div>', false)
+      : acc(`Приборы учёта (${e.rows.length})`, '<div id="meters"></div>', true)}
     ${acc('Точка поставки и сеть', kv(secHtml.net))}
   `;
-  renderMeters(e, 10);
+  // У транзитодателя свои (расчётные) ПУ — развёрнуты, транзитные — в отдельном свёрнутом аккордеоне.
+  if (trRows.length) {
+    renderMeters('#meters', e, ownRows, 10, 'Своих расчётных ПУ нет');
+    renderMeters('#trmeters', e, trRows, 10);
+  } else renderMeters('#meters', e, e.rows, 10);
   bindCard(e);
 }
 
@@ -431,26 +439,28 @@ function transitBlocks(e) {
       return `<button class="link" data-go="${esc(g.recv.id)}"><div><div class="name" style="font-size:14px">${esc(g.recv.name)}</div><div class="meta">Договор ${esc(g.recv.contract || '—')}, ЭО ${esc(g.recv.id)}<br>ПУ № ${esc(ms)}</div></div>${ICON.right}</button>`;
     }).concat(orphans.map(l => `<div class="orphan">ПУ № ${esc(X.meterOf(M.rows[l.giverRow]) || '—')}: транзитоприёмник не найден в этой базе</div>`));
     const LIM = 5;
-    h += `<div class="warn"><div class="wt">${ICON.warn}Есть транзитоприёмники: ${e.recvCount}</div>
+    h += `<div class="warn recv"><div class="wt">${ICON.warn}Есть транзитоприёмники: ${e.recvCount}</div>
       <div id="recvList">${items.slice(0, LIM).join('')}</div>
       ${items.length > LIM ? `<button class="linkbtn" id="recvAll">Показать все (${items.length})</button>` : ''}</div>`;
     transitBlocks._items = items;
   }
   for (const g of e.giverList) {
     const via = e.givers.filter(l => l.giver === g).map(l => X.meterOf(M.rows[l.recvRow]));
-    h += `<div class="warn"><div class="wt">${ICON.warn}Транзитодатель</div>
+    h += `<div class="warn giver"><div class="wt">${ICON.warn}Транзитодатель</div>
       <button class="link" data-go="${esc(g.id)}"><div><div class="name" style="font-size:14px">${esc(g.name)}</div><div class="meta">Договор ${esc(g.contract || '—')}, ЭО ${esc(g.id)}<br>через ПУ № ${esc([...new Set(via)].join(', '))}</div></div>${ICON.right}</button></div>`;
   }
   return h;
 }
 
-function renderMeters(e, limit) {
+function renderMeters(sel, e, list, limit, emptyText) {
+  const box = $(sel);
+  if (!list.length) { box.innerHTML = `<div class="nopu">${esc(emptyText || 'Приборов учёта нет')}</div>`; return; }
   const { rows, header } = M;
   const cols = header.map((h, i) => i).filter(i => sectionOf(i) === 'meter');
   const rank = i => { const h = X.hn[i]; const k = METER_FIRST.findIndex(re => re.test(h)); return k < 0 ? 99 : k; };
   cols.sort((a, b) => rank(a) - rank(b) || a - b);
   const skipCols = new Set([M.f.meter]);
-  const cards = e.rows.slice(0, limit).map(ri => {
+  const cards = list.slice(0, limit).map(ri => {
     const r = rows[ri];
     const num = X.meterOf(r), role = X.roleOf(r);
     const fs = [];
@@ -463,24 +473,23 @@ function renderMeters(e, limit) {
       const wide = v.length > 22 || /адрес|примечание|информация|наименование|причина|структура/.test(X.hn[i]);
       fs.push(field(labelOf(header[i]), v, wide));
     }
+    // У транзитного ПУ — к какому транзитоприёмнику он относится. У транзитоприёмника пометки нет:
+    // ссылка на транзитодателя уже стоит в голубом блоке вверху карточки.
     let note = '';
     if (role === 'T') {
       const ls_ = e.receivers.filter(l => l.giverRow === ri);
       note = ls_.map(l => l.recv
         ? `<div class="note">Транзитоприёмник: <button data-go="${esc(l.recv.id)}">${esc(l.recv.name)}, ЭО ${esc(l.recv.id)}</button></div>`
         : '<div class="note">Транзитоприёмник не найден в этой базе</div>').join('');
-    } else {
-      const gl = e.givers.filter(l => l.recvRow === ri);
-      note = gl.map(l => `<div class="note">Транзитодатель: <button data-go="${esc(l.giver.id)}">${esc(l.giver.name)}, ЭО ${esc(l.giver.id)}</button></div>`).join('');
     }
     const title = num ? '№ ' + num : (r[M.f.meter] || 'Без прибора учёта');
     return `<div class="pucard"><div class="r1"><span class="pu-title" data-copy="${esc(num)}">${esc(title)}</span>${num ? roleBadge(role) : ''}</div>
       ${note}<div class="kv grid2">${fs.join('')}</div></div>`;
   }).join('');
-  const left = e.rows.length - limit;
-  $('#meters').innerHTML = cards + (left > 0 ? `<div style="padding:0 14px 12px"><button class="more" id="metersAll" style="margin-top:0">Показать все приборы (${e.rows.length})</button></div>` : '');
-  if (left > 0) $('#metersAll').onclick = () => { renderMeters(e, e.rows.length); bindGo($('#meters')); bindCopy($('#meters')); };
-  bindGo($('#meters')); bindCopy($('#meters'));
+  const left = list.length - limit;
+  box.innerHTML = cards + (left > 0 ? `<div style="padding:0 14px 12px"><button class="more" style="margin-top:0">Показать все приборы (${list.length})</button></div>` : '');
+  if (left > 0) box.querySelector('.more').onclick = () => renderMeters(sel, e, list, list.length, emptyText);
+  bindGo(box); bindCopy(box);
 }
 
 function bindGo(root) {
