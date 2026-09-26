@@ -1,0 +1,633 @@
+'use strict';
+// Мобильный ЕБЦ — этап 1: поиск, карточка ЭО, транзит, загрузка базы.
+
+const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
+const VERSION = '1.0';
+const PAGE = 50;
+
+// ---------- мелкие помощники ----------
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const norm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^0-9a-zа-я]+/g, ' ').trim();
+const normH = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').replace(/\s*\/\s*/g, ' / ').trim();
+const fmtN = n => Number(n || 0).toLocaleString('ru-RU');
+const fmtDate = t => new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+const fmtPeriod = p => { const m = /^(\d{2})\.(\d{4})$/.exec(p || ''); return m ? MONTHS[+m[1] - 1] + ' ' + m[2] : ''; };
+const plural = (n, a, b, c) => { const m10 = n % 10, m100 = n % 100; return m10 === 1 && m100 !== 11 ? a : m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20) ? b : c; };
+
+const ICON = {
+  search: '<svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
+  back: '<svg class="i" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>',
+  close: '<svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  gear: '<svg class="i" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>',
+  map: '<svg class="i" viewBox="0 0 24 24"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>',
+  chev: '<svg class="i" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>',
+  right: '<svg class="i" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
+  warn: '<svg class="i" viewBox="0 0 24 24"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4M12 17h.01"/></svg>',
+  down: '<svg class="i" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
+  file: '<svg class="i" viewBox="0 0 24 24"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/></svg>'
+};
+
+// ---------- хранилища ----------
+const idb = {
+  open() {
+    return this._p || (this._p = new Promise((res, rej) => {
+      const r = indexedDB.open('mobile-ebc', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    }));
+  },
+  async tx(mode, fn) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const t = db.transaction('kv', mode); const st = t.objectStore('kv');
+      const req = fn(st);
+      t.oncomplete = () => res(req && req.result);
+      t.onerror = () => rej(t.error);
+    });
+  },
+  get(k) { return this.tx('readonly', s => s.get(k)); },
+  set(k, v) { return this.tx('readwrite', s => s.put(v, k)); },
+  del(k) { return this.tx('readwrite', s => s.delete(k)); }
+};
+const ls = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  del(k) { try { localStorage.removeItem(k); } catch {} }
+};
+
+// ---------- модель данных ----------
+let M = null;   // таблица из файла
+let X = null;   // индекс: ЭО, транзитные связи, поиск
+
+function joinAddr(parts) {
+  const out = [];
+  for (const p of parts) { const v = (p || '').trim(); if (v && !out.includes(v)) out.push(v); }
+  return out.join(', ');
+}
+
+function buildIndex(m) {
+  const { rows, f } = m;
+  const col = (r, i) => (i == null || i < 0 ? '' : (r[i] || ''));
+  const roleOf = r => { const t = norm(col(r, f.role)); return t.startsWith('транзит') ? 'T' : t.startsWith('расч') ? 'B' : ''; };
+  const meterOf = r => { const v = col(r, f.meter); return /\d/.test(v) ? v : ''; };
+  const factOf = r => joinAddr(f.fact.map(i => col(r, i)));
+  const tuOf = r => joinAddr(f.tu.map(i => col(r, i)));
+
+  const byId = new Map(), eos = [], rowEo = new Array(rows.length);
+  rows.forEach((r, i) => {
+    const id = col(r, f.eo) || ('без номера, строка ' + (i + 1));
+    let e = byId.get(id);
+    if (!e) { e = { id, rows: [], receivers: [], givers: [] }; byId.set(id, e); eos.push(e); }
+    e.rows.push(i); rowEo[i] = e;
+  });
+
+  // Транзит: один и тот же счётчик — «Транзитная» у транзитодателя и «Расчётная» у транзитоприёмника.
+  const meterRows = new Map();
+  rows.forEach((r, i) => { const n = meterOf(r); if (n) { if (!meterRows.has(n)) meterRows.set(n, []); meterRows.get(n).push(i); } });
+  let links = 0;
+  rows.forEach((r, i) => {
+    if (roleOf(r) !== 'T') return;
+    const n = meterOf(r), giver = rowEo[i];
+    let cands = n ? meterRows.get(n).filter(j => j !== i && roleOf(rows[j]) === 'B' && rowEo[j] !== giver) : [];
+    if (cands.length > 1) {
+      const same = cands.filter(j => col(rows[j], f.ikts) && col(rows[j], f.ikts) === col(r, f.ikts));
+      if (same.length) cands = same;
+    }
+    if (!cands.length) { giver.receivers.push({ giver, giverRow: i, recv: null, recvRow: null }); return; }
+    for (const j of cands) {
+      const link = { giver, giverRow: i, recv: rowEo[j], recvRow: j };
+      giver.receivers.push(link); rowEo[j].givers.push(link); links++;
+    }
+  });
+
+  for (const e of eos) {
+    const r0 = rows[e.rows[0]];
+    e.name = col(r0, f.name) || 'Без наименования';
+    e.contract = col(r0, f.contract);
+    e.inn = col(r0, f.inn);
+    e.fact = factOf(r0);
+    e.meters = e.rows.map(i => ({ row: i, num: meterOf(rows[i]), role: roleOf(rows[i]) })).filter(x => x.num);
+    e.tus = [...new Set(e.rows.map(i => tuOf(rows[i])).filter(Boolean))];
+    e.recvCount = new Set(e.receivers.map(l => (l.recv ? l.recv.id : 'row' + l.giverRow))).size;
+    e.giverList = [...new Map(e.givers.map(l => [l.giver.id, l.giver])).values()];
+    e.nName = norm(e.name);
+    e.hay = ' ' + norm([e.name, e.inn, e.contract, e.id, e.meters.map(x => x.num).join(' '), e.fact, e.tus.join(' ')].join(' ')) + ' ';
+  }
+  return { eos, byId, rowEo, roleOf, meterOf, tuOf, col, links };
+}
+
+// ---------- поиск ----------
+function tokensOf(q) { return norm(q).split(' ').filter(Boolean); }
+
+function tokenHit(hay, t) {
+  // Короткие числа (дом «12») ищем только с начала слова, длинные — где угодно (часть номера).
+  return (/^\d+$/.test(t) && t.length < 4) ? hay.includes(' ' + t) : hay.includes(t);
+}
+
+function search(q) {
+  const toks = tokensOf(q);
+  if (!toks.length) return [];
+  const nq = toks.join(' ');
+  const single = toks.length === 1 ? toks[0] : null;
+  const res = [];
+  for (const e of X.eos) {
+    let ok = true;
+    for (const t of toks) if (!tokenHit(e.hay, t)) { ok = false; break; }
+    if (!ok) continue;
+    let score = 0, why = '';
+    if (single && /\d/.test(single)) {
+      const checks = [['№ ПУ', e.meters.map(m => m.num)], ['договор', [e.contract]], ['ЭО', [e.id]], ['ИНН', [e.inn]]];
+      for (const [label, vals] of checks) {
+        for (const v of vals) {
+          const nv = norm(v);
+          if (!nv) continue;
+          if (nv === single) { score = Math.max(score, 100); why = why || label; }
+          else if (nv.startsWith(single)) { score = Math.max(score, 60); why = why || label; }
+          else if (nv.includes(single)) { score = Math.max(score, 30); why = why || label; }
+        }
+      }
+    }
+    if (e.nName.startsWith(nq)) score += 20; else if (e.nName.includes(nq)) score += 10;
+    res.push({ e, score, why });
+  }
+  res.sort((a, b) => b.score - a.score || a.e.name.localeCompare(b.e.name, 'ru'));
+  return res;
+}
+
+function highlight(text, toks) {
+  const s = esc(text);
+  if (!toks || !toks.length) return s;
+  const parts = toks.map(t => {
+    const p = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/е/g, '[её]');
+    return (/^\d+$/.test(t) && t.length < 4) ? '(?<![0-9])' + p : p;
+  });
+  try { return s.replace(new RegExp('(' + parts.join('|') + ')', 'gi'), '<mark>$1</mark>'); }
+  catch { return s; }
+}
+
+// ---------- интерфейс: общие части ----------
+function toast(msg, ms = 2200) {
+  const t = $('#toast'); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => { t.hidden = true; }, ms);
+}
+
+function setBar(html) { $('#bar').innerHTML = html; }
+function go(hash) { location.hash = hash; }
+function currentQuery() {
+  const h = location.hash || '#/';
+  return h.startsWith('#/?') || h === '#/' || h === '' ? (new URLSearchParams(h.split('?')[1] || '').get('q') || '') : '';
+}
+
+function roleBadge(role) {
+  return role === 'T' ? '<span class="badge b-T">Транзитная</span>'
+    : role === 'B' ? '<span class="badge b-B">Расчётная</span>'
+      : '<span class="badge b-x">Тип не указан</span>';
+}
+
+function transitChips(e) {
+  let h = '';
+  if (e.recvCount) h += `<span class="trl">Есть транзитоприёмники: ${e.recvCount}</span>`;
+  if (e.giverList.length === 1) h += `<span class="trl">Транзитодатель: ${esc(e.giverList[0].name)}</span>`;
+  else if (e.giverList.length > 1) h += `<span class="trl">Транзитодателей: ${e.giverList.length}</span>`;
+  return h;
+}
+
+// ---------- главная и результаты ----------
+let lastResults = [], shown = 0, lastQ = null;
+
+function renderHome() {
+  const q = currentQuery();
+  setBar(`<div class="t">Мобильный ЕБЦ</div><button class="ib" id="toData" aria-label="База данных">${ICON.gear}</button>`);
+  $('#toData').onclick = () => go('#/data');
+  $('#view').innerHTML = `
+    <div id="homeTop"><div class="hello">Кого или что<br>ищем?</div></div>
+    <label class="search" id="sbox">${ICON.search}
+      <input id="q" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" placeholder="Договор, ЭО, счётчик, адрес, ИНН, абонент">
+      <button class="clear" id="clr" aria-label="Очистить">${ICON.close}</button></label>
+    <div id="homeExtra"></div>
+    <div id="results"></div>`;
+  const input = $('#q');
+  input.value = q;
+  let tmr;
+  input.oninput = () => {
+    clearTimeout(tmr);
+    tmr = setTimeout(() => {
+      history.replaceState(null, '', input.value.trim() ? '#/?q=' + encodeURIComponent(input.value) : '#/');
+      updateResults(input.value);
+    }, 150);
+  };
+  input.onkeydown = ev => { if (ev.key === 'Enter') input.blur(); };
+  $('#clr').onclick = ev => { ev.preventDefault(); input.value = ''; history.replaceState(null, '', '#/'); updateResults(''); input.focus(); };
+  lastQ = null;
+  updateResults(q, true);
+}
+
+function renderHomeExtra() {
+  const m = M.meta;
+  const recent = ls.get('recent', []);
+  const stale = Date.now() - m.loadedAt > CFG.staleDays * 864e5;
+  $('#homeExtra').innerHTML = `
+    <div class="hint">Можно вводить часть номера или несколько слов: «ленина 12», «12345678», «ромашка раменское».</div>
+    <button class="mapbtn" disabled>${ICON.map}<div>Карта договоров<small>Появится на следующем этапе</small></div></button>
+    ${recent.length ? `<div class="sub">Недавние запросы</div><div class="chips">${recent.map(r => `<button class="chip" data-q="${esc(r)}">${esc(r)}</button>`).join('')}</div>` : ''}
+    <button class="basebar${stale ? ' stale' : ''}" id="baseInfo" style="width:100%;text-align:left">
+      <span>${stale ? 'База загружена больше месяца назад.<br>' : ''}База ${esc(fmtPeriod(m.period) || m.fileName)}<br>${fmtN(m.eo)} ЭО, ${fmtN(m.rows)} строк</span><b>Обновить</b></button>`;
+  document.querySelectorAll('[data-q]').forEach(b => b.onclick = () => {
+    const input = $('#q'); input.value = b.dataset.q;
+    history.replaceState(null, '', '#/?q=' + encodeURIComponent(b.dataset.q));
+    updateResults(b.dataset.q);
+  });
+  $('#baseInfo').onclick = () => go('#/data');
+}
+
+function updateResults(q, restoring) {
+  const box = $('#results'), has = !!q.trim();
+  $('#sbox').classList.toggle('has', has);
+  $('#sbox').classList.toggle('compact', has);
+  $('#homeTop').hidden = has;
+  if (!has) { $('#homeExtra').hidden = false; renderHomeExtra(); box.innerHTML = ''; return; }
+  $('#homeExtra').hidden = true;
+  if (q !== lastQ) {
+    lastQ = q;
+    lastResults = search(q);
+    shown = 0;
+  }
+  const want = restoring ? Math.max(PAGE, +(sessionStorage.getItem('shown:' + q) || 0)) : PAGE;
+  box.innerHTML = lastResults.length
+    ? `<div class="count">Найдено ${fmtN(lastResults.length)} ЭО</div><div class="list" id="list"></div><div id="moreBox"></div>`
+    : `<div class="empty">Ничего не нашлось.<br>Проверьте номер или попробуйте часть слова.</div>`;
+  shown = 0;
+  appendRows(want, q);
+  if (restoring) {
+    const y = +(sessionStorage.getItem('scroll:' + q) || 0);
+    if (y) requestAnimationFrame(() => window.scrollTo(0, y));
+  }
+}
+
+function appendRows(n, q) {
+  const list = $('#list'); if (!list) return;
+  const toks = tokensOf(q);
+  const slice = lastResults.slice(shown, shown + n);
+  list.insertAdjacentHTML('beforeend', slice.map(r => rowHtml(r, toks)).join(''));
+  shown += slice.length;
+  const more = $('#moreBox');
+  const left = lastResults.length - shown;
+  more.innerHTML = left > 0 ? `<button class="more" id="moreBtn">Показать ещё ${fmtN(Math.min(PAGE, left))} из ${fmtN(left)}</button>` : '';
+  if (left > 0) $('#moreBtn').onclick = () => appendRows(PAGE, q);
+  list.querySelectorAll('.row:not([data-bound])').forEach(el => {
+    el.dataset.bound = 1;
+    el.onclick = () => {
+      sessionStorage.setItem('scroll:' + q, String(window.scrollY));
+      sessionStorage.setItem('shown:' + q, String(shown));
+      rememberQuery(q);
+      go('#/eo/' + encodeURIComponent(el.dataset.id));
+    };
+  });
+}
+
+function rememberQuery(q) {
+  q = q.trim(); if (!q) return;
+  const r = ls.get('recent', []).filter(x => x !== q);
+  r.unshift(q); ls.set('recent', r.slice(0, 6));
+}
+
+function rowHtml({ e, why }, toks) {
+  const nm = e.meters.length;
+  const badge = nm ? `<span class="badge b-pu">${nm} ПУ</span>` : '<span class="badge b-x">Нет ПУ</span>';
+  const single = toks.length === 1 ? toks[0] : '';
+  const MAXPU = 3;
+  let meters = e.meters;
+  // найденный счётчик показываем первым
+  if (single) meters = [...meters].sort((a, b) => (norm(b.num).includes(single) ? 1 : 0) - (norm(a.num).includes(single) ? 1 : 0));
+  const pus = meters.slice(0, MAXPU).map(m => `<div class="pu${single && norm(m.num).includes(single) ? ' hit' : ''}"><span>№ ${highlight(m.num, toks)}</span>${roleBadge(m.role)}</div>`).join('');
+  const morePu = nm > MAXPU ? `<div class="pu" style="color:var(--muted)">ещё ${nm - MAXPU} ПУ</div>` : '';
+  const addr = e.fact || e.tus[0] || '';
+  const whyLine = why === 'ИНН' ? `<div class="why">совпало: ИНН ${highlight(e.inn, toks)}</div>` : '';
+  return `<button class="row" data-id="${esc(e.id)}">
+    <div class="r1"><div class="name">${highlight(e.name, toks)}</div>${badge}</div>
+    <div class="meta">Договор ${highlight(e.contract || '—', toks)}<br>ЭО ${highlight(e.id, toks)}${addr ? '<br>' + highlight(addr, toks) : ''}</div>
+    ${whyLine}
+    ${nm ? `<div class="pus">${pus}${morePu}</div>` : ''}
+    ${transitChips(e)}
+  </button>`;
+}
+
+// ---------- карточка ЭО ----------
+const SECTIONS = [
+  { key: 'contract', title: 'Договор и потребитель', re: /^(наименование потребителя|инн|договор|вид договора|ценовая категория|категория потребителя|юридический адрес|состояние абонента)/ },
+  { key: 'object', title: 'Энергообъект', re: /^(номер объекта|фактический адрес|регион)/ },
+  { key: 'net', title: 'Точка поставки и сеть', re: /^(наименование сетевой|наименование пэс|наименование рэс|№ рэс|наименование отделения|наименование точки поставки)/ }
+];
+const SKIP = /^(№ п ?\/ ?п)$/;
+const STRIP_TOP = ['договор', 'фактический адрес', 'прибор учета', 'потери', 'уровень напряжения', 'юридический адрес', 'адрес точки учета', 'наименование точки поставки электрической энергии'];
+const HIDE_ZERO = /^(показания|потери|расчетный способ)/;
+const METER_FIRST = [/тип счетчика/, /марка счетчика/, /^адрес точки учета/, /^расход электроэнергии/, /^общий расход/, /^показания/, /^расчетный коэффициент/, /^источник показаний/];
+
+function labelOf(h) {
+  const k = h.indexOf(' / ');
+  if (k < 0) return h;
+  const top = h.slice(0, k), sub = h.slice(k + 3);
+  const nt = normH(top);
+  if (nt === 'показания счетчика') return 'Показания: ' + sub.toLowerCase();
+  return STRIP_TOP.includes(nt) ? sub : top + ': ' + sub;
+}
+
+function sectionOf(i) {
+  const h = X.hn[i];
+  if (SKIP.test(h)) return 'skip';
+  for (const s of SECTIONS) if (s.re.test(h)) return s.key;
+  return 'meter';
+}
+
+function field(label, value, wide) {
+  return `<div class="f${wide ? ' w' : ''}"><span>${esc(label)}</span><b data-copy="${esc(value)}">${esc(value)}</b></div>`;
+}
+
+function renderCard(id) {
+  const e = X.byId.get(id);
+  setBar(`<button class="ib" id="back" aria-label="Назад">${ICON.back}</button><div class="t">Карточка ЭО</div>`);
+  $('#back').onclick = () => (history.length > 1 ? history.back() : go('#/'));
+  if (!e) { $('#view').innerHTML = '<div class="empty">Такой ЭО не найден в текущей базе.</div>'; return; }
+  window.scrollTo(0, 0);
+  const { rows, header } = M;
+
+  // поля уровня ЭО (одинаковые для всех строк) — различающиеся значения показываем через «/»
+  const secHtml = {};
+  for (const s of SECTIONS) secHtml[s.key] = [];
+  header.forEach((h, i) => {
+    const sec = sectionOf(i);
+    if (sec === 'meter' || sec === 'skip') return;
+    if (sec === 'object' && M.f.fact.includes(i)) return;
+    const vals = [...new Set(e.rows.map(r => rows[r][i] || '').filter(Boolean))];
+    if (!vals.length) return;
+    const v = vals.length > 3 ? vals.slice(0, 3).join(' / ') + ' …' : vals.join(' / ');
+    secHtml[sec].push(field(labelOf(h), v, true));
+  });
+  if (e.fact) secHtml.object.unshift(field('Фактический адрес', e.fact, true));
+  if (e.tus.length) secHtml.object.push(field(e.tus.length > 1 ? 'Адреса точек учёта' : 'Адрес точки учёта', e.tus.join(' / '), true));
+
+  const acc = (title, body, open) => body ? `<details class="acc"${open ? ' open' : ''}><summary>${title}${ICON.chev}</summary>${body}</details>` : '';
+  const kv = arr => arr.length ? `<div class="kv">${arr.join('')}</div>` : '';
+
+  $('#view').innerHTML = `
+    <div class="head">
+      <div class="name">${esc(e.name)}</div>
+      <div class="meta">Договор ${esc(e.contract || '—')}<br>ЭО ${esc(e.id)}${e.inn ? '<br>ИНН ' + esc(e.inn) : ''}</div>
+      ${transitBlocks(e)}
+    </div>
+    ${acc('Договор и потребитель', kv(secHtml.contract))}
+    ${acc('Энергообъект', kv(secHtml.object), true)}
+    ${acc(`Приборы учёта (${e.rows.length})`, '<div id="meters"></div>', true)}
+    ${acc('Точка поставки и сеть', kv(secHtml.net))}
+  `;
+  renderMeters(e, 10);
+  bindCard(e);
+}
+
+function transitBlocks(e) {
+  let h = '';
+  if (e.receivers.length) {
+    // один транзитоприёмник — одна строка, даже если связей через несколько ПУ
+    const groups = new Map(), orphans = [];
+    for (const l of e.receivers) {
+      if (!l.recv) { orphans.push(l); continue; }
+      if (!groups.has(l.recv.id)) groups.set(l.recv.id, { recv: l.recv, meters: [] });
+      const n = X.meterOf(M.rows[l.giverRow]);
+      if (!groups.get(l.recv.id).meters.includes(n)) groups.get(l.recv.id).meters.push(n);
+    }
+    const items = [...groups.values()].map(g => {
+      const ms = g.meters.length > 3 ? g.meters.slice(0, 3).join(', ') + ` и ещё ${g.meters.length - 3}` : g.meters.join(', ');
+      return `<button class="link" data-go="${esc(g.recv.id)}"><div><div class="name" style="font-size:14px">${esc(g.recv.name)}</div><div class="meta">Договор ${esc(g.recv.contract || '—')}, ЭО ${esc(g.recv.id)}<br>ПУ № ${esc(ms)}</div></div>${ICON.right}</button>`;
+    }).concat(orphans.map(l => `<div class="orphan">ПУ № ${esc(X.meterOf(M.rows[l.giverRow]) || '—')}: транзитоприёмник не найден в этой базе</div>`));
+    const LIM = 5;
+    h += `<div class="warn"><div class="wt">${ICON.warn}Есть транзитоприёмники: ${e.recvCount}</div>
+      <div id="recvList">${items.slice(0, LIM).join('')}</div>
+      ${items.length > LIM ? `<button class="linkbtn" id="recvAll">Показать все (${items.length})</button>` : ''}</div>`;
+    transitBlocks._items = items;
+  }
+  for (const g of e.giverList) {
+    const via = e.givers.filter(l => l.giver === g).map(l => X.meterOf(M.rows[l.recvRow]));
+    h += `<div class="warn"><div class="wt">${ICON.warn}Транзитодатель</div>
+      <button class="link" data-go="${esc(g.id)}"><div><div class="name" style="font-size:14px">${esc(g.name)}</div><div class="meta">Договор ${esc(g.contract || '—')}, ЭО ${esc(g.id)}<br>через ПУ № ${esc([...new Set(via)].join(', '))}</div></div>${ICON.right}</button></div>`;
+  }
+  return h;
+}
+
+function renderMeters(e, limit) {
+  const { rows, header } = M;
+  const cols = header.map((h, i) => i).filter(i => sectionOf(i) === 'meter');
+  const rank = i => { const h = X.hn[i]; const k = METER_FIRST.findIndex(re => re.test(h)); return k < 0 ? 99 : k; };
+  cols.sort((a, b) => rank(a) - rank(b) || a - b);
+  const skipCols = new Set([M.f.meter]);
+  const cards = e.rows.slice(0, limit).map(ri => {
+    const r = rows[ri];
+    const num = X.meterOf(r), role = X.roleOf(r);
+    const fs = [];
+    for (const i of cols) {
+      if (skipCols.has(i)) continue;
+      const v = r[i] || '';
+      if (!v) continue;
+      if (HIDE_ZERO.test(X.hn[i]) && /^0([.,]0+)?$/.test(v)) continue;
+      if (/тип счетчика/.test(X.hn[i])) continue;
+      const wide = v.length > 22 || /адрес|примечание|информация|наименование|причина|структура/.test(X.hn[i]);
+      fs.push(field(labelOf(header[i]), v, wide));
+    }
+    let note = '';
+    if (role === 'T') {
+      const ls_ = e.receivers.filter(l => l.giverRow === ri);
+      note = ls_.map(l => l.recv
+        ? `<div class="note">Транзитоприёмник: <button data-go="${esc(l.recv.id)}">${esc(l.recv.name)}, ЭО ${esc(l.recv.id)}</button></div>`
+        : '<div class="note">Транзитоприёмник не найден в этой базе</div>').join('');
+    } else {
+      const gl = e.givers.filter(l => l.recvRow === ri);
+      note = gl.map(l => `<div class="note">Транзитодатель: <button data-go="${esc(l.giver.id)}">${esc(l.giver.name)}, ЭО ${esc(l.giver.id)}</button></div>`).join('');
+    }
+    const title = num ? '№ ' + num : (r[M.f.meter] || 'Без прибора учёта');
+    return `<div class="pucard"><div class="r1"><span class="pu-title" data-copy="${esc(num)}">${esc(title)}</span>${num ? roleBadge(role) : ''}</div>
+      ${note}<div class="kv grid2">${fs.join('')}</div></div>`;
+  }).join('');
+  const left = e.rows.length - limit;
+  $('#meters').innerHTML = cards + (left > 0 ? `<div style="padding:0 14px 12px"><button class="more" id="metersAll" style="margin-top:0">Показать все приборы (${e.rows.length})</button></div>` : '');
+  if (left > 0) $('#metersAll').onclick = () => { renderMeters(e, e.rows.length); bindGo($('#meters')); bindCopy($('#meters')); };
+  bindGo($('#meters')); bindCopy($('#meters'));
+}
+
+function bindGo(root) {
+  root.querySelectorAll('[data-go]:not([data-gb])').forEach(b => {
+    b.dataset.gb = 1;
+    b.onclick = () => go('#/eo/' + encodeURIComponent(b.dataset.go));
+  });
+}
+
+function bindCard() {
+  const v = $('#view');
+  bindGo(v); bindCopy(v);
+  const all = $('#recvAll');
+  if (all) all.onclick = () => { $('#recvList').innerHTML = transitBlocks._items.join(''); all.remove(); bindGo($('#recvList')); };
+}
+
+// Долгое нажатие на значение — копирование.
+function bindCopy(root) {
+  root.querySelectorAll('[data-copy]:not([data-cb])').forEach(el => {
+    el.dataset.cb = 1;
+    let t = null, sx = 0, sy = 0;
+    const cancel = () => { clearTimeout(t); t = null; };
+    el.addEventListener('pointerdown', ev => {
+      sx = ev.clientX; sy = ev.clientY;
+      t = setTimeout(() => { t = null; copyText(el.dataset.copy, el); }, 550);
+    });
+    el.addEventListener('pointermove', ev => { if (t && (Math.abs(ev.clientX - sx) > 8 || Math.abs(ev.clientY - sy) > 8)) cancel(); });
+    el.addEventListener('pointerup', cancel);
+    el.addEventListener('pointercancel', cancel);
+    el.addEventListener('contextmenu', ev => ev.preventDefault());
+  });
+}
+
+async function copyText(text, el) {
+  if (!text) return;
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch {}
+    ta.remove();
+  }
+  if (navigator.vibrate) navigator.vibrate(30);
+  el.classList.add('copied'); setTimeout(() => el.classList.remove('copied'), 700);
+  toast('Скопировано: ' + (text.length > 40 ? text.slice(0, 40) + '…' : text));
+}
+
+// ---------- экран «База» ----------
+function renderData() {
+  const hasDb = !!M;
+  if (hasDb) {
+    setBar(`<button class="ib" id="back" aria-label="Назад">${ICON.back}</button><div class="t">База данных</div>`);
+    $('#back').onclick = () => (history.length > 1 ? history.back() : go('#/'));
+  } else setBar('<div class="t">Мобильный ЕБЦ</div>');
+  const m = hasDb ? M.meta : null;
+  const yd = CFG.yandexFolderUrl;
+  $('#view').innerHTML = `
+    ${hasDb ? `<div class="card"><h2>Загруженная база</h2>
+      <div class="stat"><span>Файл</span><b>${esc(m.fileName)}</b></div>
+      ${m.period ? `<div class="stat"><span>Период</span><b>${esc(fmtPeriod(m.period))}</b></div>` : ''}
+      <div class="stat"><span>Загружена</span><b>${esc(fmtDate(m.loadedAt))}</b></div>
+      <div class="stat"><span>Энергообъектов</span><b>${fmtN(m.eo)}</b></div>
+      <div class="stat"><span>Строк</span><b>${fmtN(m.rows)}</b></div>
+      <div class="stat"><span>Транзитных связей</span><b>${fmtN(X.links)}</b></div></div>`
+      : `<div class="hello">Данные<br>не загружены</div>
+      <div class="card"><h2>Как загрузить</h2><ol class="steps">
+        <li>Нажмите «Скачать с Яндекс Диска» и скачайте архив с базой.</li>
+        <li>Вернитесь сюда и нажмите «Загрузить файл».</li>
+        <li>Выберите скачанный архив и введите пароль.</li></ol>
+        <p style="margin-top:8px">Файл обрабатывается только на этом устройстве и никуда не отправляется.</p></div>`}
+    <div class="card">
+      <h2>${hasDb ? 'Обновить базу' : 'Загрузка'}</h2>
+      <button class="btn primary" id="yd"${yd ? '' : ' disabled'}>${ICON.down}Скачать с Яндекс Диска</button>
+      ${yd ? '' : '<p style="margin-top:6px;font-size:13px">Ссылка на папку ещё не указана в файле config.js.</p>'}
+      <button class="btn secondary" id="pick">${ICON.file}Загрузить файл (.zip или .csv)</button>
+      <div id="prog"></div>
+    </div>
+    ${ls.get('pw', null) ? `<div class="card"><div class="stat"><span>Пароль от архива сохранён на этом устройстве</span></div><button class="btn danger" id="forget">Забыть пароль</button></div>` : ''}
+    ${hasDb ? '<button class="btn danger" id="wipe">Удалить базу с устройства</button>' : ''}
+    <p style="text-align:center;color:var(--muted);font-size:12px;margin-top:18px">Версия приложения ${VERSION}</p>`;
+  if (yd) $('#yd').onclick = () => window.open(yd, '_blank', 'noopener');
+  $('#pick').onclick = () => $('#file').click();
+  if ($('#forget')) $('#forget').onclick = () => { ls.del('pw'); toast('Пароль удалён с устройства'); renderData(); };
+  if ($('#wipe')) $('#wipe').onclick = async () => {
+    if (!confirm('Удалить базу с этого устройства? Её можно будет загрузить заново.')) return;
+    await idb.del('db'); M = null; X = null; ls.del('recent'); toast('База удалена'); go('#/data'); renderData();
+  };
+}
+
+function setProgress(pct, stage) {
+  const p = $('#prog'); if (!p) return;
+  p.innerHTML = `<div class="progress"><div class="bar"><i style="width:${pct}%"></i></div><p>${esc(stage)}… ${pct}%</p></div>`;
+}
+function showError(msg) { const p = $('#prog'); if (p) p.innerHTML = `<div class="err">${esc(msg)}</div>`; else toast(msg, 4000); }
+
+function askPassword(errText) {
+  return new Promise(resolve => {
+    const md = $('#modal');
+    md.innerHTML = `<form class="sheet" id="pwf">
+      <h2>Пароль от архива</h2>
+      <p>${errText ? `<span style="color:var(--red)">${esc(errText)}</span>` : 'Архив защищён паролем. Он нужен, чтобы открыть базу на этом устройстве.'}</p>
+      <input type="password" id="pw" autocomplete="current-password" placeholder="Пароль" required>
+      <label class="check"><input type="checkbox" id="rem"> Запомнить на этом устройстве</label>
+      <div class="row2"><button type="button" class="btn danger" id="pwc">Отмена</button><button class="btn primary">Открыть</button></div>
+    </form>`;
+    md.hidden = false;
+    setTimeout(() => $('#pw').focus(), 50);
+    const done = v => { md.hidden = true; md.innerHTML = ''; resolve(v); };
+    $('#pwc').onclick = () => done(null);
+    $('#pwf').onsubmit = ev => { ev.preventDefault(); done({ password: $('#pw').value, remember: $('#rem').checked }); };
+  });
+}
+
+function loadFile(file) {
+  let saved = ls.get('pw', null);
+  let usedSaved = !!saved, typed = null;
+  const w = new Worker('worker.js');
+  const run = password => w.postMessage({ file, password });
+  setProgress(1, 'Начинаю');
+  w.onmessage = async ({ data }) => {
+    if (data.type === 'progress') return setProgress(data.pct, data.stage);
+    if (data.type === 'need-password' || data.type === 'bad-password') {
+      if (data.type === 'bad-password' && usedSaved) { ls.del('pw'); usedSaved = false; }
+      const r = await askPassword(data.type === 'bad-password' ? 'Пароль не подошёл. Попробуйте ещё раз.' : '');
+      if (!r) { w.terminate(); const p = $('#prog'); if (p) p.innerHTML = ''; return; }
+      typed = r; run(r.password); return;
+    }
+    if (data.type === 'error') { w.terminate(); showError(data.message); return; }
+    if (data.type === 'done') {
+      w.terminate();
+      setProgress(96, 'Сохраняю на телефоне');
+      try {
+        await idb.set('db', data.json);
+      } catch (err) {
+        showError('Не хватило места на устройстве, чтобы сохранить базу. Освободите память и попробуйте снова.');
+        return;
+      }
+      if (typed) { if (typed.remember) ls.set('pw', typed.password); else ls.del('pw'); }
+      M = JSON.parse(data.json); X = makeIndex(M);
+      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+      toast(`База загружена: ${fmtN(M.meta.eo)} ЭО`);
+      go('#/');
+    }
+  };
+  run(saved);
+}
+
+$('#file').addEventListener('change', ev => {
+  const f = ev.target.files && ev.target.files[0];
+  ev.target.value = '';
+  if (f) { if (!location.hash.startsWith('#/data')) go('#/data'); setTimeout(() => loadFile(f), 0); }
+});
+
+// ---------- навигация и запуск ----------
+function makeIndex(m) {
+  const x = buildIndex(m);
+  x.hn = m.header.map(normH);
+  return x;
+}
+
+function route() {
+  const h = location.hash || '#/';
+  $('#modal').hidden = true;
+  if (!M || h.startsWith('#/data')) return renderData();
+  if (h.startsWith('#/eo/')) return renderCard(decodeURIComponent(h.slice(5)));
+  renderHome();
+}
+window.addEventListener('hashchange', route);
+
+(async () => {
+  try {
+    const json = await idb.get('db');
+    if (json) { M = JSON.parse(json); X = makeIndex(M); }
+  } catch (err) { console.error(err); }
+  route();
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+})();
