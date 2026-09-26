@@ -2,7 +2,7 @@
 // Мобильный ЕБЦ — этап 1: поиск, карточка ЭО, транзит, загрузка базы.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.3';
+const VERSION = '1.3.1';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------
@@ -206,8 +206,8 @@ function currentQuery() {
 }
 
 function roleBadge(role) {
-  return role === 'T' ? '<span class="badge b-T">Транзитная</span>'
-    : role === 'B' ? '<span class="badge b-B">Расчётная</span>'
+  return role === 'T' ? '<span class="badge b-T">Транзитный</span>'
+    : role === 'B' ? '<span class="badge b-B">Расчётный</span>'
       : '<span class="badge b-x">Тип не указан</span>';
 }
 

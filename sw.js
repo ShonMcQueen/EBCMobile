@@ -1,7 +1,7 @@
 // Сервис-воркер: хранит файлы приложения на телефоне, чтобы оно открывалось без интернета.
 // Есть интернет — берём свежие файлы с сайта (и обновляем копию), нет — открываем сохранённую копию.
 // При изменении кода увеличьте номер версии.
-const CACHE = 'mobile-ebc-v4';
+const CACHE = 'mobile-ebc-v5';
 const ASSETS = [
   './', 'index.html', 'app.js', 'worker.js', 'config.js', 'zip.min.js',
   'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png',
