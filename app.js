@@ -2,7 +2,7 @@
 // Мобильный ЕБЦ — этап 1: поиск, карточка ЭО, транзит, загрузка базы.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.1';
+const VERSION = '1.2';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------
@@ -559,9 +559,11 @@ function renderData() {
     </div>
     ${ls.get('pw', null) ? `<div class="card"><div class="stat"><span>Пароль от архива сохранён на этом устройстве</span></div><button class="btn danger" id="forget">Забыть пароль</button></div>` : ''}
     ${hasDb ? '<button class="btn danger" id="wipe">Удалить базу с устройства</button>' : ''}
-    <p style="text-align:center;color:var(--muted);font-size:12px;margin-top:18px">Версия приложения ${VERSION}</p>`;
+    <button class="btn secondary" id="upd">Обновить приложение</button>
+    <p style="text-align:center;color:var(--muted);font-size:12px;margin-top:12px">Версия приложения ${VERSION}</p>`;
   if (yd) $('#yd').onclick = () => window.open(yd, '_blank', 'noopener');
   $('#pick').onclick = () => $('#file').click();
+  $('#upd').onclick = updateApp;
   if ($('#forget')) $('#forget').onclick = () => { ls.del('pw'); toast('Пароль удалён с устройства'); renderData(); };
   if ($('#wipe')) $('#wipe').onclick = async () => {
     if (!confirm('Удалить базу с этого устройства? Её можно будет загрузить заново.')) return;
@@ -633,6 +635,17 @@ $('#file').addEventListener('change', ev => {
   if (f) { if (!location.hash.startsWith('#/data')) go('#/data'); setTimeout(() => loadFile(f), 0); }
 });
 
+// Проверить новую версию на сайте и перезапустить приложение.
+async function updateApp() {
+  if (!navigator.onLine) { toast('Нет интернета — обновить приложение сейчас нельзя'); return; }
+  toast('Проверяю обновление…', 4000);
+  try {
+    const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+    if (reg) await reg.update();
+  } catch {}
+  setTimeout(() => location.reload(), 1200);
+}
+
 // ---------- навигация и запуск ----------
 function makeIndex(m) {
   const x = buildIndex(m);
@@ -656,6 +669,12 @@ window.addEventListener('hashchange', route);
   } catch (err) { console.error(err); }
   route();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    // Когда новая версия приложения вступила в силу — один раз перезагружаем страницу.
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (hadController && !reloaded) { reloaded = true; location.reload(); }
+    });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
   }
 })();
