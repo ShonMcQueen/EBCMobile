@@ -2,7 +2,7 @@
 // Мобильный ЕБЦ — этап 1: поиск, карточка ЭО, транзит, загрузка базы.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.3.1';
+const VERSION = '1.3.2';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------
