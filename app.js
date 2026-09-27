@@ -2,7 +2,7 @@
 // Мобильный ЕБЦ: поиск, карточка ЭО, транзит, загрузка базы. Карты — в maps.js.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------
@@ -61,6 +61,27 @@ const ls = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
   del(k) { try { localStorage.removeItem(k); } catch {} }
 };
+// лозунг под логотипом: случайный при каждом открытии приложения, не тот же, что в прошлый раз
+const SLOGANS = [
+  'ЕБЦ всегда под рукой',
+  'Вся база — в кармане',
+  'Счётчик не спрячется',
+  'Работает даже в подвале',
+  'Ctrl+F для всего Южного ТО',
+  'Найдём быстрее, чем дозвонитесь в офис',
+  'Где ТП? Вот ТП.',
+  'Меньше звонков — больше дела',
+  'Договор, ЭО, счётчик — одним поиском',
+  'Инспектор знает, куда идти',
+];
+const SLOGAN = (() => {
+  const prev = ls.get('slogan', '');
+  const pool = SLOGANS.filter(x => x !== prev);
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  ls.set('slogan', pick);
+  return pick;
+})();
+
 
 // ---------- модель данных ----------
 let M = null;   // таблица из файла
@@ -257,9 +278,10 @@ let lastResults = [], shown = 0, lastQ = null;
 
 function renderHome() {
   const q = currentQuery();
-  setBar(`<div class="t">Мобильный ЕБЦ</div><button class="ib" id="toData" aria-label="База данных">${ICON.gear}</button>`);
+  setBar(`<div class="t"></div><button class="ib" id="toData" aria-label="База данных">${ICON.gear}</button>`);
   $('#toData').onclick = () => go('#/data');
   $('#view').innerHTML = `
+    <div class="homelogo"><div><img src="logo.svg" alt="ЕБЦ"><div class="slogan">${esc(SLOGAN)}</div></div></div>
     <label class="search" id="sbox">${ICON.search}
       <input id="q" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" placeholder="Договор, ЭО, счётчик, адрес, ИНН, абонент">
       <button class="clear" id="clr" aria-label="Очистить">${ICON.close}</button></label>
@@ -287,8 +309,8 @@ function renderHomeExtra() {
   const stale = Date.now() - m.loadedAt > CFG.staleDays * 864e5;
   $('#homeExtra').innerHTML = `
     <div class="hint">Можно вводить часть номера или несколько слов: «ленина 12», «12345678», «ромашка раменское».</div>
-    <button class="mapbtn" id="toMap"${X.withCoords ? '' : ' disabled'}>${ICON.map}<div>Карта договоров<small>${X.withCoords ? 'ЭО и подстанции' : 'В базе нет координат — нужен архив из геокодера'}</small></div></button>
-    <button class="mapbtn dark" id="toSubs"${SUBS ? '' : ' disabled'}>${ICON.bolt}<div>Карта подстанций<small>${SUBS ? 'Поиск ТП по номеру' : 'В архиве не было подстанций'}</small></div></button>
+    <div class="mapbtns"><button class="mapbtn" id="toMap"${X.withCoords ? '' : ' disabled'}>${ICON.map}<div>Карта договоров<small>${X.withCoords ? 'ЭО и подстанции' : 'В базе нет координат — нужен архив из геокодера'}</small></div></button>
+    <button class="mapbtn dark" id="toSubs"${SUBS ? '' : ' disabled'}>${ICON.bolt}<div>Карта подстанций<small>${SUBS ? 'Поиск ТП по номеру' : 'В архиве не было подстанций'}</small></div></button></div>
     ${recent.length ? `<div class="sub">Недавние запросы</div><div class="chips">${recent.map(r => `<button class="chip" data-q="${esc(r)}">${esc(r)}</button>`).join('')}</div>` : ''}
     <button class="basebar${stale ? ' stale' : ''}" id="baseInfo" style="width:100%;text-align:left">
       <span>${stale ? 'База загружена больше месяца назад.<br>' : ''}База ${esc(fmtPeriod(m.period) || m.fileName)}<br>${fmtN(m.eo)} ЭО, ${fmtN(m.rows)} строк</span><b>Обновить</b></button>`;
@@ -306,6 +328,7 @@ function updateResults(q, restoring) {
   const box = $('#results'), has = !!q.trim();
   $('#sbox').classList.toggle('has', has);
   $('#sbox').classList.toggle('compact', has);
+  document.body.classList.toggle('home-idle', !has);
   if (!has) { $('#homeExtra').hidden = false; renderHomeExtra(); box.innerHTML = ''; return; }
   $('#homeExtra').hidden = true;
   if (q !== lastQ) {
@@ -855,6 +878,7 @@ async function sendFixes() {
 }
 
 function route() {
+  document.body.classList.remove('home-idle');   // вернётся, если это главная без запроса
   const h = location.hash || '#/';
   $('#modal').hidden = true;
   const isMap = h.startsWith('#/map') || h.startsWith('#/subs');
