@@ -21,10 +21,12 @@ let geoWatch = null;    // слежение за местоположением,
 
 // ---------------------------------------------------------------- значки
 const _icons = {};
-function eoIcon(apx) {
-  const k = apx ? 'eoA' : 'eo';
-  return _icons[k] || (_icons[k] = L.divIcon({ className: 'mk-eo' + (apx ? ' apx' : ''), iconSize: [14, 14] }));
+// kind: '' — обычная точка, 'apx' — примерная, 'fix' — уточнена вами (на проверке), 'man' — уточнена на месте (из базы)
+function eoIcon(kind) {
+  const k = 'eo' + (kind || '');
+  return _icons[k] || (_icons[k] = L.divIcon({ className: 'mk-eo' + (kind ? ' ' + kind : ''), iconSize: [22, 22] }));
 }
+function eoKind(e) { return e.fix ? 'fix' : e.manual ? 'man' : e.approx ? 'apx' : ''; }
 function subIcon(type, sel) {
   const k = 'sub' + type + (sel ? 's' : '');
   if (_icons[k]) return _icons[k];
@@ -46,7 +48,7 @@ function meIcon() {
   return _icons.me || (_icons.me = L.divIcon({ className: 'mk-me', iconSize: [18, 18] }));
 }
 function clusterIcon(n, kind) {
-  const d = n < 100 ? 34 : n < 1000 ? 40 : n < 10000 ? 46 : 52;
+  const d = n < 10 ? 30 : n < 100 ? 34 : n < 1000 ? 40 : n < 10000 ? 46 : 52;
   return L.divIcon({ html: `<div><span>${fmtN(n)}</span></div>`, className: 'mk-cl ' + kind, iconSize: [d, d] });
 }
 
@@ -61,11 +63,14 @@ function makeBase(el) {
 function mapShell(root) {
   root.innerHTML = `<div class="lmap"></div>
     <div class="mtop"></div>
-    <div class="mctl">
-      <button class="mb" data-z="1" aria-label="Приблизить">+</button>
-      <button class="mb" data-z="-1" aria-label="Отдалить">−</button>
-      <button class="mb loc" aria-label="Моё местоположение">${MICON.target}</button>
+    <div class="mctlwrap">
+      <div class="mctl">
+        <button class="mb" data-z="1" aria-label="Приблизить">+</button>
+        <button class="mb" data-z="-1" aria-label="Отдалить">−</button>
+      </div>
+      <button class="mb loc solo" aria-label="Моё местоположение">${MICON.target}</button>
     </div>
+    <div class="pickpin" hidden><svg viewBox="0 0 30 40"><path d="M15 39C15 39 28 24 28 14A13 13 0 0 0 2 14C2 24 15 39 15 39z" fill="#FF6408" stroke="#fff" stroke-width="2.5"/><circle cx="15" cy="14" r="5" fill="#fff"/></svg></div>
     <div class="mlegend" hidden></div>
     <div class="mbottom"></div>
     <div class="msheet" hidden></div>`;
@@ -92,17 +97,51 @@ function leaveMaps() {
 function showSheet(st, html, cls) {
   const sh = st.root.querySelector('.msheet');
   sh.className = 'msheet' + (cls ? ' ' + cls : '');
-  sh.innerHTML = '<button class="grab" aria-label="Закрыть"></button>' + html;
+  sh.innerHTML = '<div class="grab" role="button" aria-label="Смахните вниз, чтобы закрыть"><i></i></div>' + html;
   sh.hidden = false;
+  sh.style.transform = '';
   sh.scrollTop = 0;
   st.root.querySelector('.mbottom').hidden = true;
-  sh.querySelector('.grab').onclick = () => hideSheet(st);
+  bindSwipe(st, sh);
   bindCopy(sh);
   return sh;
 }
+// Смахивание окошка вниз за полосу сверху: окошко идёт за пальцем; далеко или резко — закрывается,
+// иначе возвращается на место. Простое нажатие на полосу тоже закрывает.
+function bindSwipe(st, sh) {
+  const grab = sh.querySelector('.grab');
+  let y0 = null, t0 = 0, dy = 0, moved = false;
+  grab.addEventListener('pointerdown', ev => {
+    y0 = ev.clientY; t0 = performance.now(); dy = 0; moved = false;
+    grab.setPointerCapture(ev.pointerId);
+    sh.style.transition = 'none';
+  });
+  grab.addEventListener('pointermove', ev => {
+    if (y0 === null) return;
+    dy = Math.max(0, ev.clientY - y0);
+    if (dy > 4) moved = true;
+    sh.style.transform = `translateY(${dy}px)`;
+  });
+  const end = () => {
+    if (y0 === null) return;
+    const v = dy / Math.max(1, performance.now() - t0);
+    y0 = null;
+    sh.style.transition = 'transform .18s ease-out';
+    if (!moved || dy > 90 || (dy > 30 && v > 0.5)) {
+      sh.style.transform = `translateY(${sh.offsetHeight}px)`;
+      setTimeout(() => { sh.style.transition = ''; hideSheet(st); }, 170);
+    } else {
+      sh.style.transform = '';
+      setTimeout(() => { sh.style.transition = ''; }, 190);
+    }
+  };
+  grab.addEventListener('pointerup', end);
+  grab.addEventListener('pointercancel', end);
+}
+
 function hideSheet(st) {
   const sh = st.root.querySelector('.msheet');
-  if (!sh.hidden) { sh.hidden = true; sh.innerHTML = ''; }
+  if (!sh.hidden) { sh.hidden = true; sh.innerHTML = ''; sh.style.transform = ''; }
   st.root.querySelector('.mbottom').hidden = false;
   if (st.selLayer) st.selLayer.clearLayers();
   st.sel = null;
@@ -169,6 +208,8 @@ function subMarker(st, i) {
 function legendHtml() {
   return `<div class="lg"><span class="mk-eo"></span>ЭО</div>
     <div class="lg"><span class="mk-eo apx"></span>ЭО, точка примерная</div>
+    <div class="lg"><span class="mk-eo man"></span>ЭО, уточнено на месте</div>
+    <div class="lg"><span class="mk-eo fix"></span>Уточнено вами, на проверке</div>
     <div class="lg"><span class="mk-sub pc"><b>ПЦ</b></span>ПЦ (питающий центр)</div>
     <div class="lg"><span class="mk-sub net">${MICON.bolt}</span>ТП электросети</div>
     <div class="lg"><span class="mk-sub priv">${MICON.bolt}</span>ТП частная</div>
@@ -218,42 +259,45 @@ function buildContractsMap() {
   const root = $('#mapC');
   mapShell(root);
   const map = makeBase(root.querySelector('.lmap'));
-  const st = { root, map, x: X, subs: SUBS };
+  const st = { root, map, x: X, subs: SUBS, fixVer: FIX_VER };
   const cl = L.markerClusterGroup({
     chunkedLoading: true, showCoverageOnHover: false, spiderfyOnMaxZoom: false, zoomToBoundsOnClick: false,
     maxClusterRadius: 60, iconCreateFunction: c => clusterIcon(c.getChildCount(), 'eo')
   });
   const markers = [];
   for (const e of X.eos) {
-    if (e.lat == null) continue;
-    const m = L.marker([e.lat, e.lon], { icon: eoIcon(e.approx), keyboard: false });
+    const ll = eoLL(e);
+    if (!ll) continue;
+    const m = L.marker(ll, { icon: eoIcon(eoKind(e)), keyboard: false });
     m._eo = e;
     markers.push(m);
   }
   cl.addLayers(markers);
   map.addLayer(cl);
-  cl.on('click', ev => openEoSheet(st, ev.layer._eo));
+  cl.on('click', ev => { if (!st.picking) openEoSheet(st, ev.layer._eo); });
   cl.on('clusterclick', ev => {
     const c = ev.layer, b = c.getBounds();
     // все ЭО в одной точке (один дом) — кружок не распадётся, показываем список
-    if (b.getNorthEast().distanceTo(b.getSouthWest()) < 25 || map.getZoom() >= 18) openEoListSheet(st, c.getAllChildMarkers().map(m => m._eo));
+    if (!st.picking && (b.getNorthEast().distanceTo(b.getSouthWest()) < 25 || map.getZoom() >= 18)) openEoListSheet(st, c.getAllChildMarkers().map(m => m._eo));
     else c.zoomToBounds({ padding: [50, 50] });
   });
   st.cl = cl;
   st.subsLayer = L.layerGroup().addTo(map);
   st.focusLayer = L.layerGroup().addTo(map);
   map.on('moveend', () => updateSubsLayer(st));
-  map.on('click', () => hideSheet(st));
-  if (markers.length) map.fitBounds(L.latLngBounds(markers.map(m => m.getLatLng())), { padding: [30, 30] });
+  map.on('click', () => { if (!st.picking) { hideSheet(st); closeEoDrop(st); } });
+  // без анимации: иначе конец анимации перебивает приближение к ЭО (карта из карточки, уточнение точки)
+  if (markers.length) map.fitBounds(L.latLngBounds(markers.map(m => m.getLatLng())), { padding: [30, 30], animate: false });
   bindCtl(st);
   st.root.querySelector('.mlegend').innerHTML = legendHtml();
   return st;
 }
 
-function enterContractsMap(focusId) {
+// mode: null — обычная карта; 'fix' — указать точку ЭО на карте (метка в центре)
+function enterContractsMap(focusId, mode) {
   const root = $('#mapC');
   showMapRoot(root);
-  if (!MC || MC.x !== X || MC.subs !== SUBS) {
+  if (!MC || MC.x !== X || MC.subs !== SUBS || MC.fixVer !== FIX_VER) {
     if (MC) { stopLocate(); MC.map.remove(); }
     MC = buildContractsMap();
   }
@@ -261,32 +305,93 @@ function enterContractsMap(focusId) {
   st.map.invalidateSize();
   hideSheet(st);
   st.focusLayer.clearLayers();
+  if (st.selLayer) st.selLayer.clearLayers();
   const e = focusId ? X.byId.get(focusId) : null;
+  const picking = mode === 'fix' && !!e;
+  st.picking = picking;
+  st.root.classList.toggle('picking', picking);
+  st.root.querySelector('.pickpin').hidden = !picking;
   const top = st.root.querySelector('.mtop');
   const onSubs = ls.get('subsOn', true);
-  const title = e ? esc(e.name) : 'Карта договоров';
-  const sub = e ? 'ЭО ' + esc(e.id) : `На карте ${fmtN(X.withCoords)} из ${fmtN(X.eos.length)} ЭО`;
-  top.innerHTML = `<div class="rowf"><button class="ib" id="mBack" aria-label="Назад">${ICON.back}</button>
-      <div class="pill"><b>${title}</b><span>${sub}</span></div>
-      <button class="ib" id="mInfo" aria-label="Легенда">${MICON.info}</button></div>
-    ${SUBS ? `<button class="tgl${onSubs ? ' on' : ''}" id="mTgl"><span class="tb">${MICON.boltBig}</span>Подстанции<span class="sw"><i></i></span></button>` : ''}
-    <div class="hintchip" id="mHint" hidden>Подстанции появятся при приближении</div>`;
+  const back = `<button class="ib" id="mBack" aria-label="Назад">${ICON.back}</button>`;
+  const info = `<button class="ib" id="mInfo" aria-label="Легенда">${MICON.info}</button>`;
+  let head;
+  if (picking) head = `<div class="rowf">${back}<div class="pill"><b>Уточнение точки</b><span>${esc(e.name)}</span></div></div>`;
+  else if (e) head = `<div class="rowf">${back}<div class="pill"><b>${esc(e.name)}</b><span>ЭО ${esc(e.id)}</span></div>${info}</div>`;
+  else head = `<div class="rowf">${back}<label class="msearch" id="cBox">${ICON.search}<input id="cq" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" placeholder="Договор, ЭО, счётчик, адрес, абонент"><button class="x" id="cClr" aria-label="Очистить">${ICON.close}</button></label>${info}</div>`;
+  top.innerHTML = head + (SUBS ? `<button class="tgl${onSubs ? ' on' : ''}" id="mTgl"><span class="tb">${MICON.boltBig}</span>Подстанции<span class="sw"><i></i></span></button>` : '')
+    + `<div class="hintchip" id="mHint" hidden>Подстанции появятся при приближении</div><div class="sdrop" id="cDrop" hidden></div>`;
   $('#mBack').onclick = () => (history.length > 1 ? history.back() : go('#/'));
-  $('#mInfo').onclick = () => { const lg = st.root.querySelector('.mlegend'); lg.hidden = !lg.hidden; };
+  if ($('#mInfo')) $('#mInfo').onclick = () => { const lg = st.root.querySelector('.mlegend'); lg.hidden = !lg.hidden; };
   const tg = $('#mTgl');
   if (tg) tg.onclick = () => { const v = !ls.get('subsOn', true); ls.set('subsOn', v); tg.classList.toggle('on', v); updateSubsLayer(st); };
-  const noC = X.eos.length - X.withCoords;
-  st.root.querySelector('.mbottom').innerHTML = !e && noC > 0
-    ? `<button class="nocoord" id="mNo">Без координат: ${fmtN(noC)} ЭО <b>Список ›</b></button>` : '';
-  if ($('#mNo')) $('#mNo').onclick = () => go('#/nocoords');
   st.root.querySelector('.mlegend').hidden = true;
 
-  if (e && e.lat != null) {
-    L.marker([e.lat, e.lon], { icon: pinIcon(), zIndexOffset: 2500, interactive: false }).addTo(st.focusLayer);
-    st.map.setView([e.lat, e.lon], 17, { animate: false });
-    showSheet(st, `<div class="meta" style="margin:0">${esc(e.fact || e.tus[0] || '')}</div>`, 'slim');
+  const bottom = st.root.querySelector('.mbottom');
+  const onMap = X.eos.reduce((n, x) => n + (eoLL(x) ? 1 : 0), 0);
+  const noC = X.eos.length - onMap;
+  bottom.innerHTML = '';
+  if (!e) {
+    bottom.innerHTML = `<button class="nocoord" id="mNo"${noC ? '' : ' disabled'}>На карте ${fmtN(onMap)} из ${fmtN(X.eos.length)} ЭО${noC ? ` · без координат ${fmtN(noC)} <b>Список ›</b>` : ''}</button>`;
+    if (noC) $('#mNo').onclick = () => go('#/nocoords');
+    const inp = $('#cq');
+    let tmr;
+    inp.oninput = () => { clearTimeout(tmr); tmr = setTimeout(() => showEoResults(st, inp.value), 150); };
+    inp.onfocus = () => { if (inp.value.trim()) showEoResults(st, inp.value); };
+    inp.onkeydown = ev => { if (ev.key === 'Enter') { const f = $('#cDrop [data-id]'); if (f) f.click(); else inp.blur(); } };
+    $('#cClr').onclick = ev => { ev.preventDefault(); inp.value = ''; closeEoDrop(st); hideSheet(st); inp.focus(); };
+  }
+
+  const ll = e ? eoLL(e) : null;
+  if (picking) {
+    const c = ll || st.meLL || st.map.getCenter();
+    st.map.setView(c, Math.max(17, ll ? 18 : 16), { animate: false });
+    bottom.innerHTML = `<div class="pickbar"><p>Передвиньте карту так, чтобы метка встала на объект</p>
+      <div class="row2"><button class="btn danger" id="pkCancel">Отмена</button><button class="btn primary" id="pkSave">Сохранить точку</button></div></div>`;
+    $('#pkCancel').onclick = () => history.back();
+    $('#pkSave').onclick = async () => {
+      const c2 = st.map.getCenter();
+      if (await saveFix(e, c2.lat, c2.lng, 'map', null)) history.back();
+    };
+  } else if (e && ll) {
+    L.marker(ll, { icon: pinIcon(), zIndexOffset: 2500, interactive: false }).addTo(st.focusLayer);
+    st.map.setView(ll, 17, { animate: false });
+    showSheet(st, `<div class="meta" style="margin:0">${esc(eoAddr(e))}</div>${eoPointNote(e)}`, 'slim');
   }
   updateSubsLayer(st);
+}
+
+function closeEoDrop(st) { const d = st.root.querySelector('#cDrop'); if (d) { d.hidden = true; d.innerHTML = ''; } }
+
+// Поиск на карте договоров — тот же, что на главной.
+function showEoResults(st, q) {
+  const box = st.root.querySelector('#cDrop');
+  if (!q.trim()) { closeEoDrop(st); return; }
+  const res = search(q);
+  const toks = tokensOf(q);
+  const LIM = 40;
+  box.innerHTML = res.length
+    ? `<div class="dh">Найдено ${fmtN(res.length)} ЭО${res.length > LIM ? ', показаны первые ' + LIM : ''}</div>` + res.slice(0, LIM).map(({ e }) => {
+      const has = !!eoLL(e);
+      return `<button class="ri${has ? '' : ' nomap'}" data-id="${esc(e.id)}"><span class="mk-eo ${has ? eoKind(e) : 'none'}"></span>
+        <span class="rt"><b>${highlight(e.name, toks)}</b><small>Договор ${highlight(e.contract || '—', toks)}, ЭО ${highlight(e.id, toks)}</small>
+        <small>${has ? highlight(eoAddr(e), toks) : 'нет на карте — откроется карточка'}</small></span>${ICON.right}</button>`;
+    }).join('')
+    : '<div class="dh">Ничего не нашлось. Проверьте номер или попробуйте часть слова.</div>';
+  box.hidden = false;
+  box.querySelectorAll('[data-id]').forEach(b => b.onclick = () => {
+    const e = X.byId.get(b.dataset.id);
+    closeEoDrop(st);
+    const inp = $('#cq'); inp.blur();
+    const ll = eoLL(e);
+    if (!ll) { go('#/eo/' + encodeURIComponent(e.id)); return; }
+    rememberQuery(q);
+    st.map.setView(ll, Math.max(st.map.getZoom(), 17));
+    if (!st.selLayer) st.selLayer = L.layerGroup().addTo(st.map);
+    st.selLayer.clearLayers();
+    L.marker(ll, { icon: L.divIcon({ className: 'mk-selring', iconSize: [40, 40] }), interactive: false, zIndexOffset: 2400 }).addTo(st.selLayer);
+    openEoSheet(st, e, true);
+  });
 }
 
 function updateSubsLayer(st) {
@@ -305,11 +410,20 @@ function updateSubsLayer(st) {
 
 function eoAddr(e) { return e.fact || e.tus[0] || ''; }
 
-function openEoSheet(st, e) {
+// строка про уточнённую точку (для окошка на карте и карточки)
+function eoPointNote(e) {
+  if (e.fix) return `<div class="fixnote">Точка уточнена вами ${esc(fmtDay(e.fix.ts))} — на проверке</div>`;
+  if (e.manual) return `<div class="mannote">Точка уточнена на месте${e.manualInfo ? ': ' + esc(e.manualInfo) : ''}</div>`;
+  return '';
+}
+
+function openEoSheet(st, e, keepSel) {
+  if (!keepSel && st.selLayer) st.selLayer.clearLayers();
   const nm = e.meters.length;
   const badge = nm ? `<span class="badge b-pu">${nm} ПУ</span>` : '<span class="badge b-x">Нет ПУ</span>';
   const sh = showSheet(st, `<div class="r1"><div class="name">${esc(e.name)}</div>${badge}</div>
     <div class="meta">Договор ${esc(e.contract || '—')}, ЭО ${esc(e.id)}<br>${esc(eoAddr(e))}</div>
+    ${eoPointNote(e)}
     ${transitChips(e)}
     <button class="btn primary" data-open="${esc(e.id)}">Открыть карточку</button>`);
   sh.querySelector('[data-open]').onclick = () => go('#/eo/' + encodeURIComponent(e.id));
@@ -346,7 +460,7 @@ function buildSubsMap() {
   const far = () => root.classList.toggle('far', map.getZoom() <= 11);
   map.on('zoomend', far);
   map.on('click', () => { hideSheet(st); closeDrop(st); });
-  map.fitBounds(L.latLngBounds(all), { padding: [20, 20] });
+  map.fitBounds(L.latLngBounds(all), { padding: [20, 20], animate: false });
   far();
   st.cl = cl;
   bindCtl(st);

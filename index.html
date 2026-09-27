@@ -79,7 +79,9 @@ body.mapmode .appbar,body.mapmode #view{display:none}
 .tgl .sw i{position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left .15s}
 .tgl.on .sw{background:var(--mesblue)}.tgl.on .sw i{left:15px}
 .hintchip{display:inline-block;margin:8px 0 0 8px;background:var(--ink);color:#fff;font-size:12.5px;border-radius:14px;padding:6px 11px}
-.mctl{position:absolute;right:10px;top:40%;z-index:1000;display:flex;flex-direction:column;background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(27,42,58,.18);overflow:hidden}
+.mctlwrap{position:absolute;right:10px;top:34%;z-index:1000;display:flex;flex-direction:column;gap:42px}
+.mctl{display:flex;flex-direction:column;background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(27,42,58,.18);overflow:hidden}
+.mb.solo{background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(27,42,58,.18)}
 .mb{width:42px;height:42px;display:grid;place-items:center;font-size:22px;line-height:1}
 .mb+.mb{border-top:1px solid var(--line)}
 .mb.loc{color:var(--muted)}.mb.loc.on{color:var(--blue)}.mb.loc.wait{animation:blink 1s infinite}
@@ -90,10 +92,23 @@ body.mapmode .appbar,body.mapmode #view{display:none}
 .mbottom{position:absolute;left:10px;bottom:calc(22px + env(safe-area-inset-bottom));z-index:900}
 .nocoord{background:#fff;border-radius:12px;padding:9px 12px;font-size:13.5px;box-shadow:0 2px 8px rgba(27,42,58,.18)}
 .nocoord b{color:var(--blue);margin-left:6px}.nocoord.static{color:var(--muted)}
+.nocoord[disabled]{color:var(--ink);cursor:default}
+/* режим «указать точку на карте»: метка всегда в центре, двигается карта */
+.pickpin{position:absolute;left:50%;top:50%;width:36px;height:48px;margin:-48px 0 0 -18px;z-index:1001;pointer-events:none}
+.pickpin svg{width:36px;height:48px;filter:drop-shadow(0 3px 4px rgba(0,0,0,.35))}
+.mapwrap.picking .mbottom{left:0;right:0;bottom:0}
+.pickbar{background:#fff;border-radius:20px 20px 0 0;padding:14px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -6px 20px rgba(27,42,58,.18);max-width:640px;margin:0 auto}
+.pickbar p{font-size:14.5px;color:var(--muted);margin-bottom:4px;text-align:center}
+.fixnote{margin-top:8px;background:#FFF1E6;border:1px solid var(--recvline);color:var(--recvink);border-radius:10px;padding:8px 10px;font-size:13.5px;font-weight:600}
+.mannote{margin-top:8px;color:var(--mesblue);font-size:13.5px;font-weight:600}
+.fixinfo{font-size:13px;color:var(--muted);margin-top:6px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.linkbtn.danger{color:var(--red)}
+.stat .linkbtn{padding:0;font-size:13px;margin-left:6px}
 .msheet{position:absolute;left:0;right:0;bottom:0;z-index:1100;background:#fff;border-radius:20px 20px 0 0;padding:6px 16px calc(18px + env(safe-area-inset-bottom));box-shadow:0 -6px 20px rgba(27,42,58,.18);max-height:62vh;overflow-y:auto;max-width:640px;margin:0 auto}
 .msheet.tall{max-height:66vh}
-.msheet .grab{display:block;width:44px;height:18px;margin:0 auto 6px;position:relative}
-.msheet .grab::after{content:"";position:absolute;left:3px;right:3px;top:7px;height:4px;border-radius:2px;background:#CBD3DB}
+/* полоса сверху окошка: за неё окошко смахивается вниз; отступ до текста увеличен вдвое */
+.msheet .grab{display:block;height:32px;margin:-6px -16px 9px;position:relative;touch-action:none;cursor:grab}
+.msheet .grab i{position:absolute;left:50%;top:11px;width:46px;height:5px;margin-left:-23px;border-radius:3px;background:#C3CBD4}
 .msheet .btn{margin-top:12px}
 .msheet .trl{margin-top:8px}
 .subh{display:flex;gap:12px;align-items:center}
@@ -122,8 +137,16 @@ body.mapmode .appbar,body.mapmode #view{display:none}
 .ri small{display:block;font-size:12.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ri>svg{width:16px;height:16px;color:#B0BAC4}
 /* значки на карте */
-.mk-eo{width:14px;height:14px;border-radius:50%;background:var(--mesorange);border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.18);box-sizing:border-box;display:inline-block}
-.mk-eo.apx{background:rgba(255,100,8,.28);border:1.6px dashed var(--mesorange);box-shadow:none}
+.mk-eo{width:22px;height:22px;border-radius:50%;background:var(--mesorange);border:2.5px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.2),0 1px 3px rgba(0,0,0,.25);box-sizing:border-box;display:inline-block}
+.mk-eo.apx{background:rgba(255,100,8,.3);border:2px dashed var(--mesorange);box-shadow:none}
+.mk-eo.man{border:3.5px solid var(--mesblue)}
+.mk-eo.fix{background:#fff;border:6px solid var(--mesorange);box-shadow:0 0 0 2px var(--mesblue)}
+.mk-eo.none{background:#C9D1D9;box-shadow:none}
+.mk-selring{border-radius:50%;border:3px solid var(--mesorange);background:rgba(255,100,8,.14);box-sizing:border-box}
+.lg .mk-eo{width:18px;height:18px}
+.ri .mk-eo{width:16px;height:16px;flex:none;border-width:2px}
+.ri.nomap .rt b{color:var(--muted)}
+.ri .rt small+small{margin-top:1px}
 .mk-sub{width:16px;height:16px;border-radius:3px;border:1.6px solid #fff;box-sizing:border-box;display:inline-grid;place-items:center;box-shadow:0 0 0 1px rgba(0,0,0,.15)}
 .mk-sub .bolt{width:10px;height:10px;fill:#fff}
 .mk-sub.net{background:var(--mesblue)}.mk-sub.priv{background:var(--green)}

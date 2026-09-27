@@ -2,7 +2,7 @@
 // Мобильный ЕБЦ: поиск, карточка ЭО, транзит, загрузка базы. Карты — в maps.js.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------
@@ -28,7 +28,9 @@ const ICON = {
   down: '<svg class="i" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
   file: '<svg class="i" viewBox="0 0 24 24"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/></svg>',
   bolt: '<svg class="i" viewBox="0 0 24 24" style="stroke:none;fill:currentColor"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>',
-  pin: '<svg class="i" viewBox="0 0 24 24"><path d="M12 21s7-6.1 7-12a7 7 0 1 0-14 0c0 5.9 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/></svg>'
+  pin: '<svg class="i" viewBox="0 0 24 24"><path d="M12 21s7-6.1 7-12a7 7 0 1 0-14 0c0 5.9 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/></svg>',
+  target: '<svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>',
+  share: '<svg class="i" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg>'
 };
 
 // ---------- хранилища ----------
@@ -64,6 +66,16 @@ const ls = {
 let M = null;   // таблица из файла
 let X = null;   // индекс: ЭО, транзитные связи, поиск
 let SUBS = null; // подстанции из .geojson (хранятся отдельно: новая база без подстанций их не стирает)
+let FIXES = {};  // уточнения координат, сделанные на этом телефоне: ЭО → {lat, lon, ts, how, acc, sent}
+let FIX_VER = 0; // растёт при каждом изменении уточнений — карта перестраивается
+
+// Точка ЭО на карте: своё уточнение (на проверке) важнее координат из базы.
+function eoLL(e) { return e.fix ? [e.fix.lat, e.fix.lon] : e.lat != null ? [e.lat, e.lon] : null; }
+const fmtDay = t => new Date(t).toLocaleDateString('ru-RU');
+function distM(a, b) {
+  const dy = (a[0] - b[0]) * 111000, dx = (a[1] - b[1]) * 111000 * Math.cos(a[0] * Math.PI / 180);
+  return Math.round(Math.hypot(dx, dy));
+}
 
 function joinAddr(parts) {
   const out = [];
@@ -120,7 +132,7 @@ function buildIndex(m) {
     e.addr = ' ' + normQ([e.fact, e.tus.join(' ')].join(' ')) + ' ';
     e.hay = ' ' + normQ([e.name, e.inn, e.contract, e.id, e.meters.map(x => x.num).join(' ')].join(' ')) + e.addr;
     // координаты из геокодера (колонки «Координаты / Широта, Долгота, Точность»)
-    e.lat = e.lon = null; e.approx = false;
+    e.lat = e.lon = null; e.approx = false; e.manual = false; e.manualInfo = ''; e.fix = null;
     if (f.lat >= 0 && f.lon >= 0) {
       for (const i of e.rows) {
         const la = parseFloat(String(col(rows[i], f.lat)).replace(',', '.')), lo = parseFloat(String(col(rows[i], f.lon)).replace(',', '.'));
@@ -128,6 +140,9 @@ function buildIndex(m) {
           e.lat = la; e.lon = lo;
           const pr = norm(col(rows[i], f.prec));
           e.approx = !!pr && pr !== 'дом';
+          const src = col(rows[i], f.src);
+          e.manual = /^вручную/i.test(src);
+          if (e.manual) { const m = /\((.+)\)/.exec(src); e.manualInfo = m ? m[1] : ''; }
           break;
         }
       }
@@ -385,6 +400,7 @@ function labelOf(h) {
 function sectionOf(i) {
   const h = X.hn[i];
   if (SKIP.test(h)) return 'skip';
+  if (/^координаты \//.test(h)) return 'skip';   // служебные колонки геокодера — они для карты
   for (const s of SECTIONS) if (s.re.test(h)) return s.key;
   return 'meter';
 }
@@ -415,9 +431,13 @@ function renderCard(id) {
   });
   if (e.fact) secHtml.object.unshift(field('Фактический адрес', e.fact, true));
   if (e.tus.length) secHtml.object.push(field(e.tus.length > 1 ? 'Адреса точек учёта' : 'Адрес точки учёта', e.tus.join(' / '), true));
-  if (X.hasCoordCols) secHtml.object.push(e.lat != null
+  if (X.hasCoordCols || e.fix) secHtml.object.push(eoLL(e)
     ? `<button class="onmap" id="onMap">${ICON.pin}Показать на карте</button>`
     : `<button class="onmap" disabled>${ICON.pin}Адрес не найден</button>`);
+  secHtml.object.push(eoPointNote(e)
+    + (e.fix ? `<div class="fixinfo">${e.fix.how === 'gps' ? 'По GPS' + (e.fix.acc ? ', точность ±' + Math.round(e.fix.acc) + ' м' : '') : 'Указано на карте'}${e.fix.sent ? ' · отправлено' : ' · ещё не отправлено'}
+        <button class="linkbtn danger" id="fixDel">Удалить уточнение</button></div>` : '')
+    + `<button class="onmap" id="fixBtn">${ICON.target}Уточнить местоположение</button>`);
 
   const trRows = e.rows.filter(ri => X.roleOf(rows[ri]) === 'T');
   const ownRows = e.rows.filter(ri => X.roleOf(rows[ri]) !== 'T');
@@ -445,6 +465,11 @@ function renderCard(id) {
   } else renderMeters('#meters', e, e.rows, 10);
   bindCard(e);
   if ($('#onMap')) $('#onMap').onclick = () => go('#/map/eo/' + encodeURIComponent(e.id));
+  $('#fixBtn').onclick = () => openFixChooser(e);
+  if ($('#fixDel')) $('#fixDel').onclick = async () => {
+    if (!confirm('Удалить ваше уточнение точки? Вернётся точка из базы.')) return;
+    delete FIXES[e.id]; await saveFixes(); toast('Уточнение удалено'); renderCard(e.id);
+  };
 }
 
 function transitBlocks(e) {
@@ -592,6 +617,7 @@ function renderData() {
       <button class="btn secondary" id="pick">${ICON.file}Загрузить файл (.zip или .csv)</button>
       <div id="prog"></div>
     </div>
+    ${hasDb ? fixesCardHtml() : ''}
     ${ls.get('pw', null) ? `<div class="card"><div class="stat"><span>Пароль от архива сохранён на этом устройстве</span></div><button class="btn danger" id="forget">Забыть пароль</button></div>` : ''}
     ${hasDb ? '<button class="btn danger" id="wipe">Удалить базу с устройства</button>' : ''}
     <button class="btn secondary" id="upd">Обновить приложение</button>
@@ -599,6 +625,9 @@ function renderData() {
   if (yd) $('#yd').onclick = () => window.open(yd, '_blank', 'noopener');
   $('#pick').onclick = () => $('#file').click();
   $('#upd').onclick = updateApp;
+  if ($('#fxSend')) $('#fxSend').onclick = sendFixes;
+  if ($('#fxName')) $('#fxName').onclick = async () => { const n = await askName(true); if (n) renderData(); };
+  document.querySelectorAll('#fxList [data-go]').forEach(b => b.onclick = () => go('#/eo/' + encodeURIComponent(b.dataset.go)));
   if ($('#forget')) $('#forget').onclick = () => { ls.del('pw'); toast('Пароль удалён с устройства'); renderData(); };
   if ($('#wipe')) $('#wipe').onclick = async () => {
     if (!confirm('Удалить базу с этого устройства? Её можно будет загрузить заново.')) return;
@@ -659,8 +688,10 @@ function loadFile(file) {
       }
       if (typed) { if (typed.remember) ls.set('pw', typed.password); else ls.del('pw'); }
       M = JSON.parse(data.json); X = makeIndex(M);
+      const acceptedFixes = await pruneAcceptedFixes();
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-      toast(`База загружена: ${fmtN(M.meta.eo)} ЭО` + (data.subs ? `, подстанций ${fmtN(SUBS.items.length)}` : SUBS ? ' (подстанции — из прошлой загрузки)' : ''), 3500);
+      toast(`База загружена: ${fmtN(M.meta.eo)} ЭО` + (data.subs ? `, подстанций ${fmtN(SUBS.items.length)}` : SUBS ? ' (подстанции — из прошлой загрузки)' : '')
+        + (acceptedFixes ? `. Ваших уточнений принято: ${acceptedFixes}` : ''), 4000);
       go('#/');
     }
   };
@@ -688,7 +719,139 @@ async function updateApp() {
 function makeIndex(m) {
   const x = buildIndex(m);
   x.hn = m.header.map(normH);
+  X = x;
+  applyFixes();
   return x;
+}
+
+// ---------- уточнение координат инспектором ----------
+function applyFixes() {
+  if (!X) return;
+  for (const e of X.eos) e.fix = FIXES[e.id] || null;
+}
+async function saveFixes() {
+  await idb.set('fixes', JSON.stringify(FIXES));
+  FIX_VER++;
+  applyFixes();
+}
+
+// После загрузки новой базы: если там уже стоит ручная точка (вы её приняли) рядом с уточнением — уточнение снимаем.
+async function pruneAcceptedFixes() {
+  let n = 0;
+  for (const id of Object.keys(FIXES)) {
+    const e = X.byId.get(id), f = FIXES[id];
+    if (e && e.manual && e.lat != null && distM([e.lat, e.lon], [f.lat, f.lon]) < 15) { delete FIXES[id]; n++; }
+  }
+  await saveFixes();
+  return n;
+}
+
+function askName(change) {
+  return new Promise(resolve => {
+    const md = $('#modal');
+    md.innerHTML = `<form class="sheet" id="nmf">
+      <h2>Ваше имя</h2>
+      <p>Оно попадёт в файл уточнений, чтобы было видно, кто уточнил точку. Спрашиваем один раз.</p>
+      <input type="text" id="nm" placeholder="Фамилия И. О." value="${esc(ls.get('inspector', '') || '')}" required>
+      <div class="row2"><button type="button" class="btn danger" id="nmc">Отмена</button><button class="btn primary">${change ? 'Сохранить' : 'Продолжить'}</button></div>
+    </form>`;
+    md.hidden = false;
+    setTimeout(() => $('#nm').focus(), 50);
+    const done = v => { md.hidden = true; md.innerHTML = ''; resolve(v); };
+    $('#nmc').onclick = () => done(null);
+    $('#nmf').onsubmit = ev => { ev.preventDefault(); const v = $('#nm').value.trim(); if (!v) return; ls.set('inspector', v); done(v); };
+  });
+}
+
+async function saveFix(e, lat, lon, how, acc) {
+  if (!ls.get('inspector', '') && !(await askName())) return false;
+  FIXES[e.id] = { lat: +lat.toFixed(6), lon: +lon.toFixed(6), ts: Date.now(), how, acc: acc == null ? null : Math.round(acc), sent: false };
+  await saveFixes();
+  toast('Точка сохранена — на проверке. Отправьте уточнения с экрана «База данных»', 4000);
+  return true;
+}
+
+function openFixChooser(e) {
+  const md = $('#modal');
+  md.innerHTML = `<div class="sheet">
+    <h2>Уточнить местоположение</h2>
+    <p>${esc(e.name)}<br>ЭО ${esc(e.id)}</p>
+    <button class="btn primary" id="fxGps">${ICON.target}Я на объекте — взять моё местоположение</button>
+    <button class="btn secondary" id="fxMap">${ICON.map}Указать на карте</button>
+    <button class="btn danger" id="fxNo">Отмена</button></div>`;
+  md.hidden = false;
+  const close = () => { md.hidden = true; md.innerHTML = ''; };
+  $('#fxNo').onclick = close;
+  $('#fxMap').onclick = () => { close(); go('#/map/fix/' + encodeURIComponent(e.id)); };
+  $('#fxGps').onclick = () => {
+    if (!navigator.geolocation) { toast('Телефон не поддерживает определение местоположения'); return; }
+    const b = $('#fxGps'); b.disabled = true; b.lastChild.textContent = 'Определяю местоположение…';
+    navigator.geolocation.getCurrentPosition(async pos => {
+      close();
+      const acc = pos.coords.accuracy;
+      const warn = acc > 50 ? `\n\nТочность низкая (±${Math.round(acc)} м). Лучше выйти на улицу или указать точку на карте.` : '';
+      if (!confirm(`Сохранить ваше местоположение как точку ЭО?\nТочность ±${Math.round(acc)} м.${warn}`)) return;
+      if (await saveFix(e, pos.coords.latitude, pos.coords.longitude, 'gps', acc)) renderCard(e.id);
+    }, err => {
+      close();
+      toast(err && err.code === 1 ? 'Нет разрешения на местоположение — разрешите его для сайта в настройках браузера'
+        : 'Не удалось определить местоположение — проверьте, включена ли геолокация', 4000);
+    }, { enableHighAccuracy: true, timeout: 25000, maximumAge: 0 });
+  };
+}
+
+function fixesCardHtml() {
+  const ids = Object.keys(FIXES);
+  const unsent = ids.filter(id => !FIXES[id].sent).length;
+  const name = ls.get('inspector', '');
+  const list = ids.slice(0, 20).map(id => {
+    const e = X.byId.get(id), f = FIXES[id];
+    return `<button class="link" data-go="${esc(id)}"><div><div class="name" style="font-size:14px">${esc(e ? e.name : 'ЭО ' + id)}</div>
+      <div class="meta">ЭО ${esc(id)} · ${esc(fmtDay(f.ts))} · ${f.how === 'gps' ? 'GPS' : 'на карте'}${f.sent ? ' · отправлено' : ''}</div></div>${ICON.right}</button>`;
+  }).join('');
+  return `<div class="card"><h2>Уточнения координат</h2>
+    <div class="stat"><span>На проверке</span><b>${fmtN(ids.length)}${ids.length ? `<small>не отправлено: ${fmtN(unsent)}</small>` : ''}</b></div>
+    <div class="stat"><span>Ваше имя</span><b>${name ? esc(name) : 'не указано'} <button class="linkbtn" id="fxName">изменить</button></b></div>
+    ${ids.length ? `<div id="fxList">${list}${ids.length > 20 ? `<p class="meta">и ещё ${ids.length - 20}</p>` : ''}</div>` : '<p class="meta">Уточнить точку можно в карточке ЭО: «Уточнить местоположение».</p>'}
+    <button class="btn primary" id="fxSend"${ids.length ? '' : ' disabled'}>${ICON.share}Отправить уточнения</button>
+    <p class="meta" style="margin-top:6px">Откроется «Поделиться» — выберите MAX и получателя. Точки появятся у всех после проверки, со следующей базой.</p></div>`;
+}
+
+// Файл уточнений — CSV (Chrome разрешает отправлять через «Поделиться» только некоторые типы файлов, .json среди них нет).
+async function sendFixes() {
+  const ids = Object.keys(FIXES);
+  if (!ids.length) return;
+  let who = ls.get('inspector', '');
+  if (!who) { who = await askName(); if (!who) return; }
+  const q = v => { const s = String(v ?? ''); return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const lines = ['eo;lat;lon;ts;how;acc;inspector;name;contract'];
+  for (const id of ids) {
+    const f = FIXES[id], e = X.byId.get(id);
+    lines.push([id, f.lat, f.lon, f.ts, f.how, f.acc ?? '', who, e ? e.name : '', e ? e.contract : ''].map(q).join(';'));
+  }
+  // имя файла латиницей: браузеры и мессенджеры иногда теряют русские имена файлов
+  const TR = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
+  const lat = w => w.split('').map(c => { const l = c.toLowerCase(), t = TR[l]; return t === undefined ? c : (c !== l ? t.charAt(0).toUpperCase() + t.slice(1) : t); }).join('').replace(/[^A-Za-z0-9-]/g, '');
+  const d = new Date(), pad = n => String(n).padStart(2, '0');
+  const fname = `utochneniya_${lat(who.split(/\s+/)[0]) || 'inspector'}_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.csv`;
+  const file = new File(['\ufeff' + lines.join('\r\n') + '\r\n'], fname, { type: 'text/csv' });
+  const markSent = async () => { for (const id of ids) FIXES[id].sent = true; await saveFixes(); renderData(); };
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: 'Уточнения координат', text: `Уточнения координат ЭО: ${ids.length} — ${who}` });
+      await markSent();
+      toast('Уточнения отправлены');
+    } catch (err) {
+      if (err && err.name !== 'AbortError') toast('Не удалось открыть «Поделиться»: ' + err.message, 4000);
+    }
+    return;
+  }
+  // ПК или браузер без «Поделиться» — сохраняем файл
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file); a.download = fname; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  await markSent();
+  toast('Файл сохранён в «Загрузки» — отправьте его через MAX', 4500);
 }
 
 function route() {
@@ -698,6 +861,7 @@ function route() {
   if (!isMap) leaveMaps();
   if (!M || h.startsWith('#/data')) { leaveMaps(); return renderData(); }
   if (h.startsWith('#/map/eo/')) return enterContractsMap(decodeURIComponent(h.slice(9)));
+  if (h.startsWith('#/map/fix/')) return enterContractsMap(decodeURIComponent(h.slice(10)), 'fix');
   if (h === '#/map') return enterContractsMap(null);
   if (h.startsWith('#/subs')) return enterSubsMap();
   if (h.startsWith('#/nocoords')) return renderNoCoords();
@@ -712,6 +876,8 @@ window.addEventListener('hashchange', route);
     if (json) { M = JSON.parse(json); X = makeIndex(M); }
     const sj = await idb.get('subs');
     if (sj) SUBS = JSON.parse(sj);
+    const fj = await idb.get('fixes');
+    if (fj) { FIXES = JSON.parse(fj) || {}; if (X) applyFixes(); }
   } catch (err) { console.error(err); }
   route();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {

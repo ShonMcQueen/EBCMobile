@@ -152,7 +152,8 @@ function buildModel(text, fileName, onProgress) {
     tu: findAll(/^адрес точки учета/),
     lat: find(/^координаты \/ широта$/),
     lon: find(/^координаты \/ долгота$/),
-    prec: find(/^координаты \/ точность$/)
+    prec: find(/^координаты \/ точность$/),
+    src: find(/^координаты \/ источник координат$/)
   };
   const missing = [];
   if (f.eo < 0) missing.push('«Номер объекта»');
