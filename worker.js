@@ -15,18 +15,30 @@ onmessage = async e => {
     const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
     const isZip = head[0] === 0x50 && head[1] === 0x4b && head[2] === 3 && head[3] === 4;
 
+    let subs = null;
     if (isZip) {
       const reader = new zip.ZipReader(new zip.BlobReader(file));
-      const entries = (await reader.getEntries()).filter(en => !en.directory && /\.csv$/i.test(en.filename));
+      const all = (await reader.getEntries()).filter(en => !en.directory);
+      const entries = all.filter(en => /\.csv$/i.test(en.filename));
+      const geos = all.filter(en => /\.geojson$/i.test(en.filename));
       if (!entries.length) { await reader.close(); throw userError('В архиве нет CSV-файла.'); }
       entries.sort((a, b) => b.uncompressedSize - a.uncompressedSize);
       const entry = entries[0];
-      if (entry.encrypted && !password) { await reader.close(); post('need-password'); return; }
+      if ((entry.encrypted || geos.some(g => g.encrypted)) && !password) { await reader.close(); post('need-password'); return; }
       try {
         bytes = await entry.getData(new zip.Uint8ArrayWriter(), {
           password: password || undefined,
           onprogress: (i, t) => post('progress', { stage: 'Распаковываю', pct: 2 + Math.round((i / (t || 1)) * 28) })
         });
+        if (geos.length) {
+          post('progress', { stage: 'Читаю подстанции', pct: 30 });
+          const files = [];
+          for (const g of geos) {
+            const b = await g.getData(new zip.Uint8ArrayWriter(), { password: password || undefined });
+            files.push({ name: g.filename.split('/').pop(), text: decode(b) });
+          }
+          subs = buildSubs(files);
+        }
       } catch (err) {
         await reader.close();
         if (/password|encrypted/i.test(err.message || '')) { post('bad-password'); return; }
@@ -45,7 +57,7 @@ onmessage = async e => {
     const model = buildModel(text, name, p => post('progress', { stage: 'Разбираю строки', pct: 32 + Math.round(p * 58) }));
     text = null;
     post('progress', { stage: 'Сохраняю на телефоне', pct: 93 });
-    post('done', { json: JSON.stringify(model), meta: model.meta });
+    post('done', { json: JSON.stringify(model), meta: model.meta, subs: subs ? JSON.stringify(subs) : null });
   } catch (err) {
     post('error', { message: err.user ? err.message : 'Не удалось обработать файл: ' + (err.message || err) });
   }
@@ -137,7 +149,10 @@ function buildModel(text, fileName, onProgress) {
     iktsHead: find(/^иктс головной/),
     ikts: find(/^иктс ту$/),
     fact: findAll(/^фактический адрес/),
-    tu: findAll(/^адрес точки учета/)
+    tu: findAll(/^адрес точки учета/),
+    lat: find(/^координаты \/ широта$/),
+    lon: find(/^координаты \/ долгота$/),
+    prec: find(/^координаты \/ точность$/)
   };
   const missing = [];
   if (f.eo < 0) missing.push('«Номер объекта»');
@@ -164,4 +179,60 @@ function buildModel(text, fileName, onProgress) {
       rows: rows.length, eo: eoSet.size, transit, loadedAt: Date.now()
     }
   };
+}
+
+// ---------------------------------------------------------------- подстанции (.geojson из Конструктора Яндекс Карт)
+// Цвет точки = тип: #1e98ff — ТП электросети, #1bad03 — частная ТП, #ed4543 — ПЦ.
+const SUB_TYPES = { '#1e98ff': 'net', '#1bad03': 'priv', '#ed4543': 'pc' };
+
+// «ТП Раменского ПО» → «Раменское ПО», «ТП Жуковского РЭС» → «Жуковский РЭС»
+function poName(meta, fileName) {
+  let n = (meta || '').trim() || fileName.replace(/\.geojson$/i, '');
+  n = n.replace(/^(тп|подстанции|трансформаторные подстанции)\s+/i, '');
+  // \b в JavaScript не видит русские буквы, поэтому граница слова — через (?=…)
+  n = n.replace(/([А-Яа-яЁё]+)ского(\s+ПО)(?=$|[\s,.])/g, '$1ское$2');
+  n = n.replace(/([А-Яа-яЁё]+)ского(\s+РЭС)(?=$|[\s,.])/g, '$1ский$2');
+  return n.trim() || 'участок не указан';
+}
+
+function buildSubs(files) {
+  const po = [], items = [], counts = { pc: 0, net: 0, priv: 0 };
+  let dupes = 0;
+  const byName = new Map();          // название → индексы в items (для поиска дублей между файлами)
+  for (const f of files) {
+    let data;
+    try { data = JSON.parse(f.text); } catch { continue; }
+    const feats = (data && data.features) || [];
+    const pName = poName(data.metadata && data.metadata.name, f.name);
+    let pi = po.indexOf(pName);
+    if (pi < 0) { po.push(pName); pi = po.length - 1; }
+    for (const ft of feats) {
+      const g = ft && ft.geometry, pr = (ft && ft.properties) || {};
+      if (!g || g.type !== 'Point' || !Array.isArray(g.coordinates)) continue;
+      const lon = +g.coordinates[0], lat = +g.coordinates[1];
+      if (!isFinite(lat) || !isFinite(lon)) continue;
+      const desc = String(pr.description || '').trim();
+      const name = String(pr.iconCaption || '').trim() || desc.split(/[\n\t]/)[0].slice(0, 40) || 'Без названия';
+      const type = SUB_TYPES[String(pr['marker-color'] || '').toLowerCase()] || 'net';
+      const key = name.toLowerCase().replace(/\s+/g, ' ');
+      const same = (byName.get(key) || []).find(i => {
+        const o = items[i];
+        const dy = (o[0] - lat) * 111000, dx = (o[1] - lon) * 111000 * Math.cos(lat * Math.PI / 180);
+        return Math.hypot(dx, dy) < 50;
+      });
+      if (same !== undefined) {                     // тот же ПЦ в двух файлах — показываем один раз
+        const o = items[same];
+        if (!o[3].includes(pi)) o[3].push(pi);
+        if (!o[5] && desc) o[5] = desc;
+        dupes++;
+        continue;
+      }
+      items.push([+lat.toFixed(6), +lon.toFixed(6), name, [pi], type, desc]);
+      counts[type]++;
+      if (!byName.has(key)) byName.set(key, []);
+      byName.get(key).push(items.length - 1);
+    }
+  }
+  if (!items.length) return null;
+  return { v: 1, po, items, counts, dupes, files: files.length, loadedAt: Date.now() };
 }

@@ -1,8 +1,8 @@
 'use strict';
-// Мобильный ЕБЦ — этап 1: поиск, карточка ЭО, транзит, загрузка базы.
+// Мобильный ЕБЦ: поиск, карточка ЭО, транзит, загрузка базы. Карты — в maps.js.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.3.2';
+const VERSION = '1.4.0';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------
@@ -26,7 +26,9 @@ const ICON = {
   right: '<svg class="i" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
   warn: '<svg class="i" viewBox="0 0 24 24"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4M12 17h.01"/></svg>',
   down: '<svg class="i" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
-  file: '<svg class="i" viewBox="0 0 24 24"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/></svg>'
+  file: '<svg class="i" viewBox="0 0 24 24"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/></svg>',
+  bolt: '<svg class="i" viewBox="0 0 24 24" style="stroke:none;fill:currentColor"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>',
+  pin: '<svg class="i" viewBox="0 0 24 24"><path d="M12 21s7-6.1 7-12a7 7 0 1 0-14 0c0 5.9 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/></svg>'
 };
 
 // ---------- хранилища ----------
@@ -61,6 +63,7 @@ const ls = {
 // ---------- модель данных ----------
 let M = null;   // таблица из файла
 let X = null;   // индекс: ЭО, транзитные связи, поиск
+let SUBS = null; // подстанции из .geojson (хранятся отдельно: новая база без подстанций их не стирает)
 
 function joinAddr(parts) {
   const out = [];
@@ -116,8 +119,22 @@ function buildIndex(m) {
     e.nName = norm(e.name);
     e.addr = ' ' + normQ([e.fact, e.tus.join(' ')].join(' ')) + ' ';
     e.hay = ' ' + normQ([e.name, e.inn, e.contract, e.id, e.meters.map(x => x.num).join(' ')].join(' ')) + e.addr;
+    // координаты из геокодера (колонки «Координаты / Широта, Долгота, Точность»)
+    e.lat = e.lon = null; e.approx = false;
+    if (f.lat >= 0 && f.lon >= 0) {
+      for (const i of e.rows) {
+        const la = parseFloat(String(col(rows[i], f.lat)).replace(',', '.')), lo = parseFloat(String(col(rows[i], f.lon)).replace(',', '.'));
+        if (isFinite(la) && isFinite(lo) && la > 40 && la < 75 && lo > 19 && lo < 180) {
+          e.lat = la; e.lon = lo;
+          const pr = norm(col(rows[i], f.prec));
+          e.approx = !!pr && pr !== 'дом';
+          break;
+        }
+      }
+    }
   }
-  return { eos, byId, rowEo, roleOf, meterOf, tuOf, col, links };
+  const withCoords = eos.reduce((n, e) => n + (e.lat != null ? 1 : 0), 0);
+  return { eos, byId, rowEo, roleOf, meterOf, tuOf, col, links, withCoords, hasCoordCols: f.lat >= 0 };
 }
 
 // ---------- поиск ----------
@@ -255,7 +272,8 @@ function renderHomeExtra() {
   const stale = Date.now() - m.loadedAt > CFG.staleDays * 864e5;
   $('#homeExtra').innerHTML = `
     <div class="hint">Можно вводить часть номера или несколько слов: «ленина 12», «12345678», «ромашка раменское».</div>
-    <button class="mapbtn" disabled>${ICON.map}<div>Карта договоров<small>Появится на следующем этапе</small></div></button>
+    <button class="mapbtn" id="toMap"${X.withCoords ? '' : ' disabled'}>${ICON.map}<div>Карта договоров<small>${X.withCoords ? 'ЭО и подстанции' : 'В базе нет координат — нужен архив из геокодера'}</small></div></button>
+    <button class="mapbtn dark" id="toSubs"${SUBS ? '' : ' disabled'}>${ICON.bolt}<div>Карта подстанций<small>${SUBS ? 'Поиск ТП по номеру' : 'В архиве не было подстанций'}</small></div></button>
     ${recent.length ? `<div class="sub">Недавние запросы</div><div class="chips">${recent.map(r => `<button class="chip" data-q="${esc(r)}">${esc(r)}</button>`).join('')}</div>` : ''}
     <button class="basebar${stale ? ' stale' : ''}" id="baseInfo" style="width:100%;text-align:left">
       <span>${stale ? 'База загружена больше месяца назад.<br>' : ''}База ${esc(fmtPeriod(m.period) || m.fileName)}<br>${fmtN(m.eo)} ЭО, ${fmtN(m.rows)} строк</span><b>Обновить</b></button>`;
@@ -265,6 +283,8 @@ function renderHomeExtra() {
     updateResults(b.dataset.q);
   });
   $('#baseInfo').onclick = () => go('#/data');
+  if (X.withCoords) $('#toMap').onclick = () => go('#/map');
+  if (SUBS) $('#toSubs').onclick = () => go('#/subs');
 }
 
 function updateResults(q, restoring) {
@@ -395,6 +415,9 @@ function renderCard(id) {
   });
   if (e.fact) secHtml.object.unshift(field('Фактический адрес', e.fact, true));
   if (e.tus.length) secHtml.object.push(field(e.tus.length > 1 ? 'Адреса точек учёта' : 'Адрес точки учёта', e.tus.join(' / '), true));
+  if (X.hasCoordCols) secHtml.object.push(e.lat != null
+    ? `<button class="onmap" id="onMap">${ICON.pin}Показать на карте</button>`
+    : `<button class="onmap" disabled>${ICON.pin}Адрес не найден</button>`);
 
   const trRows = e.rows.filter(ri => X.roleOf(rows[ri]) === 'T');
   const ownRows = e.rows.filter(ri => X.roleOf(rows[ri]) !== 'T');
@@ -421,6 +444,7 @@ function renderCard(id) {
     renderMeters('#trmeters', e, trRows, 10);
   } else renderMeters('#meters', e, e.rows, 10);
   bindCard(e);
+  if ($('#onMap')) $('#onMap').onclick = () => go('#/map/eo/' + encodeURIComponent(e.id));
 }
 
 function transitBlocks(e) {
@@ -552,7 +576,9 @@ function renderData() {
       <div class="stat"><span>Загружена</span><b>${esc(fmtDate(m.loadedAt))}</b></div>
       <div class="stat"><span>Энергообъектов</span><b>${fmtN(m.eo)}</b></div>
       <div class="stat"><span>Строк</span><b>${fmtN(m.rows)}</b></div>
-      <div class="stat"><span>Транзитных связей</span><b>${fmtN(X.links)}</b></div></div>`
+      <div class="stat"><span>Транзитных связей</span><b>${fmtN(X.links)}</b></div>
+      ${X.hasCoordCols ? `<div class="stat"><span>ЭО на карте</span><b>${fmtN(X.withCoords)}</b></div>` : '<div class="stat"><span>ЭО на карте</span><b>нет координат<small>загрузите архив из геокодера</small></b></div>'}
+      <div class="stat"><span>Подстанций</span><b>${SUBS ? fmtN(SUBS.items.length) + `<small>ПЦ ${fmtN(SUBS.counts.pc)} · сети ${fmtN(SUBS.counts.net)} · частных ${fmtN(SUBS.counts.priv)}</small>` : 'нет'}</b></div></div>`
       : `<div class="hello">Данные<br>не загружены</div>
       <div class="card"><h2>Как загрузить</h2><ol class="steps">
         <li>Нажмите «Скачать с Яндекс Диска» и скачайте архив с базой.</li>
@@ -576,7 +602,7 @@ function renderData() {
   if ($('#forget')) $('#forget').onclick = () => { ls.del('pw'); toast('Пароль удалён с устройства'); renderData(); };
   if ($('#wipe')) $('#wipe').onclick = async () => {
     if (!confirm('Удалить базу с этого устройства? Её можно будет загрузить заново.')) return;
-    await idb.del('db'); M = null; X = null; ls.del('recent'); toast('База удалена'); go('#/data'); renderData();
+    await idb.del('db'); await idb.del('subs'); M = null; X = null; SUBS = null; ls.del('recent'); toast('База удалена'); go('#/data'); renderData();
   };
 }
 
@@ -628,10 +654,13 @@ function loadFile(file) {
         showError('Не хватило места на устройстве, чтобы сохранить базу. Освободите память и попробуйте снова.');
         return;
       }
+      if (data.subs) {           // в архиве были подстанции — заменяем; не было — оставляем прошлые
+        try { await idb.set('subs', data.subs); SUBS = JSON.parse(data.subs); } catch (err) { console.error(err); }
+      }
       if (typed) { if (typed.remember) ls.set('pw', typed.password); else ls.del('pw'); }
       M = JSON.parse(data.json); X = makeIndex(M);
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-      toast(`База загружена: ${fmtN(M.meta.eo)} ЭО`);
+      toast(`База загружена: ${fmtN(M.meta.eo)} ЭО` + (data.subs ? `, подстанций ${fmtN(SUBS.items.length)}` : SUBS ? ' (подстанции — из прошлой загрузки)' : ''), 3500);
       go('#/');
     }
   };
@@ -665,7 +694,13 @@ function makeIndex(m) {
 function route() {
   const h = location.hash || '#/';
   $('#modal').hidden = true;
-  if (!M || h.startsWith('#/data')) return renderData();
+  const isMap = h.startsWith('#/map') || h.startsWith('#/subs');
+  if (!isMap) leaveMaps();
+  if (!M || h.startsWith('#/data')) { leaveMaps(); return renderData(); }
+  if (h.startsWith('#/map/eo/')) return enterContractsMap(decodeURIComponent(h.slice(9)));
+  if (h === '#/map') return enterContractsMap(null);
+  if (h.startsWith('#/subs')) return enterSubsMap();
+  if (h.startsWith('#/nocoords')) return renderNoCoords();
   if (h.startsWith('#/eo/')) return renderCard(decodeURIComponent(h.slice(5)));
   renderHome();
 }
@@ -675,6 +710,8 @@ window.addEventListener('hashchange', route);
   try {
     const json = await idb.get('db');
     if (json) { M = JSON.parse(json); X = makeIndex(M); }
+    const sj = await idb.get('subs');
+    if (sj) SUBS = JSON.parse(sj);
   } catch (err) { console.error(err); }
   route();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
