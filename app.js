@@ -2,7 +2,7 @@
 // Мобильный ЕБЦ: поиск, карточка ЭО, транзит, загрузка базы. Карты — в maps.js.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------

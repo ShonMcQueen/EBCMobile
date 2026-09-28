@@ -1,18 +1,24 @@
 'use strict';
 // Мобильный ЕБЦ — карты (этап 3): «Карта договоров», карта из карточки ЭО, «Карта подстанций».
-// Подложка — OpenStreetMap через Leaflet. Файлы Leaflet лежат рядом, из интернета грузятся только картинки карты.
+// Подложка — Яндекс Карты (Tiles API, нужен ключ в config.js) или OpenStreetMap; при сбое одной — переключаемся на другую. Файлы Leaflet лежат рядом, из интернета грузятся только картинки карты.
 // Этот файл только объявляет функции; вызывает их app.js (маршруты #/map, #/map/eo/…, #/subs, #/nocoords).
 
 const SUB_MIN_ZOOM = 14;   // с этого масштаба (≈ 2–3 км на экран) подстанции видны на карте договоров
 const OSM_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 const OSM_ATTR = '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>';
+// Яндекс: web_mercator — та же проекция, что у Leaflet; scale=2 — чёткие картинки на экранах телефонов
+const Y_URL = 'https://tiles.api-maps.yandex.ru/v1/tiles/?apikey={key}&lang=ru_RU&x={x}&y={y}&z={z}&l=map&projection=web_mercator&scale={sc}';
+const BASE_NAME = { yandex: 'Яндекс Карты', osm: 'OpenStreetMap' };
+let baseSession = null;   // подложка, на которую переключились сами из-за сбоя (до перезапуска приложения)
+let baseAutoDone = false; // автоматически переключаем не больше одного раза, чтобы не «прыгать» туда-обратно
 
 const MICON = {
   bolt: '<svg viewBox="-5 -5 10 10" class="bolt"><path d="M1.2-4.2 -2.4 0.6H0L-1.2 4.2 2.4-0.6H0z"/></svg>',
   boltBig: '<svg class="i" viewBox="0 0 24 24" style="stroke:none;fill:currentColor"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>',
   target: '<svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>',
   info: '<svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></svg>',
-  pin: '<svg class="i" viewBox="0 0 24 24"><path d="M12 21s7-6.1 7-12a7 7 0 1 0-14 0c0 5.9 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/></svg>'
+  pin: '<svg class="i" viewBox="0 0 24 24"><path d="M12 21s7-6.1 7-12a7 7 0 1 0-14 0c0 5.9 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/></svg>',
+  layers: '<svg class="i" viewBox="0 0 24 24"><path d="M12 3 2 8.5 12 14l10-5.5z"/><path d="m2 13.5 10 5.5 10-5.5"/></svg>'
 };
 
 let MC = null;          // карта договоров (один экземпляр, живёт между заходами)
@@ -53,11 +59,75 @@ function clusterIcon(n, kind) {
 }
 
 // ---------------------------------------------------------------- общая оболочка экрана карты
+function yKey() { return String((window.APP_CONFIG && APP_CONFIG.yandexTilesKey) || '').trim(); }
+// какая подложка сейчас: выбор пользователя (кнопка «слои») → автопереключение при сбое → Яндекс, если есть ключ
+function curBase() {
+  if (!yKey()) return 'osm';
+  return baseSession || (ls.get('base', 'yandex') === 'osm' ? 'osm' : 'yandex');
+}
+
+// Логотип Яндекса — обязательное условие: в углу карты, ссылкой на Яндекс Карты.
+// Файл yandex-logo.png кладётся рядом с приложением; если его нет — показываем надпись.
+const YLogo = L.Control.extend({
+  options: { position: 'bottomright' },
+  onAdd() {
+    const a = L.DomUtil.create('a', 'ylogo');
+    a.href = 'https://yandex.ru/maps'; a.target = '_blank'; a.rel = 'noopener';
+    a.innerHTML = '<img src="yandex-logo.png" alt="Яндекс Карты">';
+    a.querySelector('img').onerror = () => { a.textContent = 'Яндекс Карты'; a.classList.add('txt'); };
+    L.DomEvent.disableClickPropagation(a);
+    return a;
+  }
+});
+
 function makeBase(el) {
   const map = L.map(el, { zoomControl: false, attributionControl: true, maxZoom: 19, minZoom: 6, center: [55.58, 38.2], zoom: 10 });
-  L.tileLayer(OSM_URL, { maxZoom: 19, attribution: OSM_ATTR }).addTo(map);
   map.attributionControl.setPrefix(false);
+  setBase(map, curBase());
   return map;
+}
+
+function setBase(map, kind) {
+  if (map._baseKind === kind) return;
+  if (map._baseLayer) map.removeLayer(map._baseLayer);
+  if (map._ylogo) { map.removeControl(map._ylogo); map._ylogo = null; }
+  const layer = kind === 'yandex'
+    ? L.tileLayer(Y_URL, { maxZoom: 19, key: encodeURIComponent(yKey()), sc: L.Browser.retina ? 2 : 1, attribution: '' })
+    : L.tileLayer(OSM_URL, { maxZoom: 19, attribution: OSM_ATTR });
+  // следим, грузятся ли картинки: если подряд одни ошибки — переключаемся на другую подложку
+  let ok = 0, bad = 0;
+  layer.on('tileload', () => { ok++; });
+  layer.on('tileerror', () => {
+    bad++;
+    if (bad >= 4 && ok === 0 && !baseAutoDone && navigator.onLine !== false && yKey()) {
+      baseAutoDone = true;
+      baseSession = kind === 'yandex' ? 'osm' : 'yandex';
+      syncBases();
+      toast(`${BASE_NAME[kind]} не загружаются — показываю ${BASE_NAME[baseSession]}`);
+    }
+  });
+  layer.addTo(map);
+  layer.bringToBack();
+  if (kind === 'yandex') map._ylogo = new YLogo().addTo(map);
+  map._baseLayer = layer;
+  map._baseKind = kind;
+}
+
+// привести обе карты (договоров и подстанций) к текущей подложке
+function syncBases() {
+  for (const st of [MC, MS]) if (st && st.map) {
+    setBase(st.map, curBase());
+    const b = st.root.querySelector('.mb.lay');
+    if (b) b.hidden = !yKey();
+  }
+}
+
+function toggleBase() {
+  const next = curBase() === 'yandex' ? 'osm' : 'yandex';
+  ls.set('base', next);
+  baseSession = null;
+  syncBases();
+  toast('Подложка: ' + BASE_NAME[next]);
 }
 
 function mapShell(root) {
@@ -68,7 +138,10 @@ function mapShell(root) {
         <button class="mb" data-z="1" aria-label="Приблизить">+</button>
         <button class="mb" data-z="-1" aria-label="Отдалить">−</button>
       </div>
-      <button class="mb loc solo" aria-label="Моё местоположение">${MICON.target}</button>
+      <div class="mctl2">
+        <button class="mb loc solo" aria-label="Моё местоположение">${MICON.target}</button>
+        <button class="mb lay solo" aria-label="Сменить подложку карты"${yKey() ? '' : ' hidden'}>${MICON.layers}</button>
+      </div>
     </div>
     <div class="pickpin" hidden><svg viewBox="0 0 30 40"><path d="M15 39C15 39 28 24 28 14A13 13 0 0 0 2 14C2 24 15 39 15 39z" fill="#FF6408" stroke="#fff" stroke-width="2.5"/><circle cx="15" cy="14" r="5" fill="#fff"/></svg></div>
     <div class="mlegend" hidden></div>
@@ -80,6 +153,7 @@ function bindCtl(st) {
   const r = st.root;
   r.querySelectorAll('[data-z]').forEach(b => b.onclick = () => st.map.setZoom(st.map.getZoom() + (+b.dataset.z)));
   r.querySelector('.loc').onclick = () => locate(st);
+  r.querySelector('.lay').onclick = () => toggleBase();
 }
 
 function showMapRoot(root) {
@@ -302,6 +376,7 @@ function enterContractsMap(focusId, mode) {
     MC = buildContractsMap();
   }
   const st = MC;
+  syncBases();
   st.map.invalidateSize();
   hideSheet(st);
   st.focusLayer.clearLayers();
@@ -489,6 +564,7 @@ function enterSubsMap() {
     $('#sClr').onclick = ev => { ev.preventDefault(); inp.value = ''; closeDrop(MS); hideSheet(MS); inp.focus(); };
   }
   $('#sBack').onclick = () => (history.length > 1 ? history.back() : go('#/'));
+  syncBases();
   MS.map.invalidateSize();
 }
 

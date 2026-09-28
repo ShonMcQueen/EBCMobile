@@ -7,5 +7,10 @@ window.APP_CONFIG = {
   yandexFolderUrl: 'https://disk.yandex.ru/d/LooZ7H_Zhxf_dQ',
 
   // Через сколько дней после загрузки базы показывать напоминание «пора обновить».
-  staleDays: 35
+  staleDays: 35,
+
+  // Ключ Яндекс Карт (Tiles API) для подложки карты. Кабинет разработчика Яндекса → Tiles API → ключ.
+  // В настройках ключа ограничьте его адресом вашего сайта (…github.io).
+  // Пока пусто — карта на OpenStreetMap, как раньше.
+  yandexTilesKey: '33661f45-fa2a-4b4e-b5a8-b890529b8f1c'
 };
