@@ -329,32 +329,14 @@ function stopLocate() {
 }
 
 // ---------------------------------------------------------------- карта договоров
-function buildContractsMap() {
+function buildContractsMap(noMain) {
   const root = $('#mapC');
   mapShell(root);
   const map = makeBase(root.querySelector('.lmap'));
   const st = { root, map, x: X, subs: SUBS, fixVer: FIX_VER };
-  const cl = L.markerClusterGroup({
-    chunkedLoading: true, showCoverageOnHover: false, spiderfyOnMaxZoom: false, zoomToBoundsOnClick: false,
-    maxClusterRadius: 60, iconCreateFunction: c => clusterIcon(c.getChildCount(), 'eo')
-  });
-  const markers = [];
-  for (const e of X.eos) {
-    const ll = eoLL(e);
-    if (!ll) continue;
-    const m = L.marker(ll, { icon: eoIcon(eoKind(e)), keyboard: false });
-    m._eo = e;
-    markers.push(m);
-  }
-  cl.addLayers(markers);
-  map.addLayer(cl);
-  cl.on('click', ev => { if (!st.picking) openEoSheet(st, ev.layer._eo); });
-  cl.on('clusterclick', ev => {
-    const c = ev.layer, b = c.getBounds();
-    // все ЭО в одной точке (один дом) — кружок не распадётся, показываем список
-    if (!st.picking && (b.getNorthEast().distanceTo(b.getSouthWest()) < 25 || map.getZoom() >= 18)) openEoListSheet(st, c.getAllChildMarkers().map(m => m._eo));
-    else c.zoomToBounds({ padding: [50, 50] });
-  });
+  const { cl, markers } = eoCluster(st, X.eos, true);
+  // открыли сразу «ЭО договора» — общий слой не включаем (он грузится частями, и его нельзя снимать на полпути)
+  if (!noMain) map.addLayer(cl);
   st.cl = cl;
   st.subsLayer = L.layerGroup().addTo(map);
   st.focusLayer = L.layerGroup().addTo(map);
@@ -367,13 +349,40 @@ function buildContractsMap() {
   return st;
 }
 
-// mode: null — обычная карта; 'fix' — указать точку ЭО на карте (метка в центре)
+// Кружки ЭО на карте договоров: все ЭО базы или только ЭО одного договора.
+function eoCluster(st, list, chunked) {
+  const map = st.map;
+  const cl = L.markerClusterGroup({
+    chunkedLoading: !!chunked, showCoverageOnHover: false, spiderfyOnMaxZoom: false, zoomToBoundsOnClick: false,
+    maxClusterRadius: 60, iconCreateFunction: c => clusterIcon(c.getChildCount(), 'eo')
+  });
+  const markers = [];
+  for (const e of list) {
+    const ll = eoLL(e);
+    if (!ll) continue;
+    const m = L.marker(ll, { icon: eoIcon(eoKind(e)), keyboard: false });
+    m._eo = e;
+    markers.push(m);
+  }
+  cl.addLayers(markers);
+  cl.on('click', ev => { if (!st.picking) openEoSheet(st, ev.layer._eo); });
+  cl.on('clusterclick', ev => {
+    const c = ev.layer, b = c.getBounds();
+    // все ЭО в одной точке (один дом) — кружок не распадётся, показываем список
+    if (!st.picking && (b.getNorthEast().distanceTo(b.getSouthWest()) < 25 || map.getZoom() >= 18)) openEoListSheet(st, c.getAllChildMarkers().map(m => m._eo));
+    else c.zoomToBounds({ padding: [50, 50] });
+  });
+  return { cl, markers };
+}
+
+// mode: null — обычная карта; 'fix' — указать точку ЭО на карте (метка в центре);
+// 'contract' — только ЭО одного договора (focusId — номер договора)
 function enterContractsMap(focusId, mode) {
   const root = $('#mapC');
   showMapRoot(root);
   if (!MC || MC.x !== X || MC.subs !== SUBS || MC.fixVer !== FIX_VER) {
     if (MC) { stopLocate(); MC.map.remove(); }
-    MC = buildContractsMap();
+    MC = buildContractsMap(mode === 'contract');
   }
   const st = MC;
   syncBases();
@@ -381,6 +390,10 @@ function enterContractsMap(focusId, mode) {
   hideSheet(st);
   st.focusLayer.clearLayers();
   if (st.selLayer) st.selLayer.clearLayers();
+  // режим «ЭО договора»: вместо всех кружков — только кружки этого договора
+  if (st.ccl) { st.map.removeLayer(st.ccl); st.ccl = null; }
+  if (mode === 'contract') return enterContractOnMap(st, focusId);
+  if (!st.map.hasLayer(st.cl)) st.map.addLayer(st.cl);
   const e = focusId ? X.byId.get(focusId) : null;
   const picking = mode === 'fix' && !!e;
   st.picking = picking;
@@ -433,6 +446,34 @@ function enterContractsMap(focusId, mode) {
     st.map.setView(ll, 17, { animate: false });
     showSheet(st, `<div class="meta" style="margin:0">${esc(eoAddr(e))}</div>${eoPointNote(e)}`, 'slim');
   }
+  updateSubsLayer(st);
+}
+
+function enterContractOnMap(st, contract) {
+  const list = contractEos(contract);
+  st.picking = false;
+  st.root.classList.remove('picking');
+  st.root.querySelector('.pickpin').hidden = true;
+  if (st.map.hasLayer(st.cl)) st.map.removeLayer(st.cl);
+  const { cl, markers } = eoCluster(st, list);
+  st.ccl = cl;
+  st.map.addLayer(cl);
+  const onSubs = ls.get('subsOn', true);
+  const name = list[0] ? list[0].name : '';
+  st.root.querySelector('.mtop').innerHTML = `<div class="rowf"><button class="ib" id="mBack" aria-label="Назад">${ICON.back}</button>
+      <div class="pill"><b>${esc(name)}</b><span>Договор ${esc(contract)}</span></div>
+      <button class="ib" id="mInfo" aria-label="Легенда">${MICON.info}</button></div>`
+    + (SUBS ? `<button class="tgl${onSubs ? ' on' : ''}" id="mTgl"><span class="tb">${MICON.boltBig}</span>Подстанции<span class="sw"><i></i></span></button>` : '')
+    + `<div class="hintchip" id="mHint" hidden>Подстанции появятся при приближении</div>`;
+  $('#mBack').onclick = () => (history.length > 1 ? history.back() : go('#/'));
+  $('#mInfo').onclick = () => { const lg = st.root.querySelector('.mlegend'); lg.hidden = !lg.hidden; };
+  const tg = $('#mTgl');
+  if (tg) tg.onclick = () => { const v = !ls.get('subsOn', true); ls.set('subsOn', v); tg.classList.toggle('on', v); updateSubsLayer(st); };
+  st.root.querySelector('.mlegend').hidden = true;
+  const noC = list.length - markers.length;
+  st.root.querySelector('.mbottom').innerHTML = `<div class="nocoord static">На карте ${fmtN(markers.length)} из ${fmtN(list.length)} ЭО договора${noC ? ` · без координат ${fmtN(noC)}` : ''}</div>`;
+  if (markers.length === 1) st.map.setView(markers[0].getLatLng(), 17, { animate: false });
+  else if (markers.length) st.map.fitBounds(L.latLngBounds(markers.map(m => m.getLatLng())), { padding: [50, 50], maxZoom: 17, animate: false });
   updateSubsLayer(st);
 }
 

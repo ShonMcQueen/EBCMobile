@@ -2,7 +2,7 @@
 // Мобильный ЕБЦ: поиск, карточка ЭО, транзит, загрузка базы. Карты — в maps.js.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------
@@ -132,7 +132,8 @@ function buildIndex(m) {
       const same = cands.filter(j => col(rows[j], f.ikts) && col(rows[j], f.ikts) === col(r, f.ikts));
       if (same.length) cands = same;
     }
-    if (!cands.length) { giver.receivers.push({ giver, giverRow: i, recv: null, recvRow: null }); return; }
+    // без номера счётчика связь не найти — такую строку не показываем вовсе
+    if (!cands.length) { if (n) giver.receivers.push({ giver, giverRow: i, recv: null, recvRow: null }); return; }
     for (const j of cands) {
       const link = { giver, giverRow: i, recv: rowEo[j], recvRow: j };
       giver.receivers.push(link); rowEo[j].givers.push(link); links++;
@@ -189,7 +190,7 @@ function houseRe(t) {
   return new RegExp(' ' + reEsc(t) + (/[а-я]$/.test(t) ? '(?![0-9а-я])' : '(?![0-9])'));
 }
 
-function search(q) {
+function search(q, list) {
   const toks = tokensOf(q);
   if (!toks.length) return [];
   const nq = toks.join(' ');
@@ -205,7 +206,7 @@ function search(q) {
     pairRe.push([new RegExp(base + '(?![0-9а-я])'), new RegExp(base + '(?![0-9])')]);
   }
   const res = [];
-  for (const e of X.eos) {
+  for (const e of (list || X.eos)) {
     let ok = true;
     for (const t of plain) if (!e.hay.includes(t)) { ok = false; break; }
     if (ok) for (const r of hRe) if (!r.test(e.addr)) { ok = false; break; }
@@ -324,6 +325,41 @@ function renderHomeExtra() {
   if (SUBS) $('#toSubs').onclick = () => go('#/subs');
 }
 
+// ---------- договоры ----------
+let _byC = null;
+// все ЭО договора, по возрастанию номера ЭО
+function contractEos(c) {
+  if (!_byC || _byC.x !== X) {
+    const m = new Map();
+    for (const e of X.eos) { const k = e.contract || '—' + e.id; if (!m.has(k)) m.set(k, []); m.get(k).push(e); }
+    for (const l of m.values()) l.sort((a, b) => a.id.localeCompare(b.id, 'ru', { numeric: true }));
+    _byC = { x: X, m };
+  }
+  return _byC.m.get(c) || [];
+}
+const cKey = e => e.contract || '—' + e.id;
+const eoAddrOf = e => [e.fact, ...e.tus].filter(Boolean)[0] || '';
+
+// Выдача: нашли по номеру счётчика или ЭО — сразу ЭО; иначе — договоры (сначала те, где совпало наименование, ИНН или номер договора)
+let lastItems = [];
+function buildItems(q) {
+  const toks = tokensOf(q);
+  const items = [], groups = new Map();
+  for (const r of lastResults) {
+    if (r.why === '№ ПУ' || r.why === 'ЭО') { items.push({ eo: r }); continue; }
+    const k = cKey(r.e);
+    let g = groups.get(k);
+    if (!g) { g = { key: k, e: r.e, hits: [] }; groups.set(k, g); items.push({ g }); }
+    g.hits.push(r.e);
+  }
+  const head = it => {
+    if (!it.g) return 0;
+    const e = it.g.e, n = ' ' + normQ([e.name, e.inn, e.contract].join(' ')) + ' ';
+    return toks.every(t => n.includes(t)) ? 0 : 1;
+  };
+  return items.map((it, i) => [head(it), i, it]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map(x => x[2]);
+}
+
 function updateResults(q, restoring) {
   const box = $('#results'), has = !!q.trim();
   $('#sbox').classList.toggle('has', has);
@@ -334,11 +370,13 @@ function updateResults(q, restoring) {
   if (q !== lastQ) {
     lastQ = q;
     lastResults = search(q);
+    lastItems = buildItems(q);
     shown = 0;
   }
   const want = restoring ? Math.max(PAGE, +(sessionStorage.getItem('shown:' + q) || 0)) : PAGE;
+  const nC = lastItems.filter(it => it.g).length;
   box.innerHTML = lastResults.length
-    ? `<div class="count">Найдено ${fmtN(lastResults.length)} ЭО</div><div class="list" id="list"></div><div id="moreBox"></div>`
+    ? `<div class="count">Найдено ${nC ? fmtN(nC) + ' ' + plural(nC, 'договор', 'договора', 'договоров') + ' · ' : ''}${fmtN(lastResults.length)} ЭО</div><div class="list" id="list"></div><div id="moreBox"></div>`
     : `<div class="empty">Ничего не нашлось.<br>Проверьте номер или попробуйте часть слова.</div>`;
   shown = 0;
   appendRows(want, q);
@@ -351,22 +389,120 @@ function updateResults(q, restoring) {
 function appendRows(n, q) {
   const list = $('#list'); if (!list) return;
   const toks = tokensOf(q);
-  const slice = lastResults.slice(shown, shown + n);
-  list.insertAdjacentHTML('beforeend', slice.map(r => rowHtml(r, toks)).join(''));
+  const slice = lastItems.slice(shown, shown + n);
+  list.insertAdjacentHTML('beforeend', slice.map(it => it.g ? contractCardHtml(it.g, toks) : eoHitHtml(it.eo, toks)).join(''));
   shown += slice.length;
   const more = $('#moreBox');
-  const left = lastResults.length - shown;
+  const left = lastItems.length - shown;
   more.innerHTML = left > 0 ? `<button class="more" id="moreBtn">Показать ещё ${fmtN(Math.min(PAGE, left))} из ${fmtN(left)}</button>` : '';
   if (left > 0) $('#moreBtn').onclick = () => appendRows(PAGE, q);
-  list.querySelectorAll('.row:not([data-bound])').forEach(el => {
+  const leave = () => {
+    sessionStorage.setItem('scroll:' + q, String(window.scrollY));
+    sessionStorage.setItem('shown:' + q, String(shown));
+    rememberQuery(q);
+  };
+  list.querySelectorAll('[data-id]:not([data-bound])').forEach(el => {
     el.dataset.bound = 1;
-    el.onclick = () => {
-      sessionStorage.setItem('scroll:' + q, String(window.scrollY));
-      sessionStorage.setItem('shown:' + q, String(shown));
-      rememberQuery(q);
-      go('#/eo/' + encodeURIComponent(el.dataset.id));
-    };
+    el.onclick = () => { leave(); go('#/eo/' + encodeURIComponent(el.dataset.id)); };
   });
+  list.querySelectorAll('[data-c]:not([data-bound])').forEach(el => {
+    el.dataset.bound = 1;
+    el.onclick = () => { leave(); go('#/c/' + encodeURIComponent(el.dataset.c) + (el.dataset.q ? '?q=' + encodeURIComponent(el.dataset.q) : '')); };
+  });
+}
+
+// Карточка договора в выдаче
+function contractCardHtml(g, toks) {
+  const all = contractEos(g.key), e = g.e;
+  const pu = all.reduce((s, x) => s + x.meters.length, 0);
+  const one = all.length === 1;
+  const sub = g.hits.length < all.length;
+  // в договор передаём запрос, только если искали не по наименованию/ИНН/номеру договора
+  const n = ' ' + normQ([e.name, e.inn, e.contract].join(' ')) + ' ';
+  const byName = toks.every(t => n.includes(t));
+  const addr = one ? eoAddrOf(all[0]) : '';
+  const attrs = one ? `data-id="${esc(all[0].id)}"` : `data-c="${esc(g.key)}"${byName ? '' : ` data-q="${esc(lastQ)}"`}`;
+  return `<button class="row ccard" ${attrs}>
+    <div class="r1"><div class="name">${highlight(e.name, toks)}</div><span class="badge b-obj">${fmtN(all.length)} ЭО</span></div>
+    <div class="meta">Договор ${highlight(e.contract || '—', toks)}${e.inn ? ' · ИНН ' + highlight(e.inn, toks) : ''}<br>${fmtN(pu)} ПУ${sub ? ` · <b class="found">найдено ${fmtN(g.hits.length)} из ${fmtN(all.length)} ЭО</b>` : ''}${addr ? '<br>' + highlight(addr, toks) : ''}</div>
+    ${one ? transitChips(all[0]) : ''}
+    <div class="cgo">${one ? 'Открыть карточку ЭО' : 'Открыть договор'}${ICON.right}</div></button>`;
+}
+
+// Нашли по номеру счётчика или ЭО — показываем сам ЭО и ссылку на его договор
+function eoHitHtml(r, toks) {
+  const n = contractEos(cKey(r.e)).length;
+  return n > 1
+    ? `<div class="ehit">${rowHtml(r, toks)}<button class="ctl" data-c="${esc(cKey(r.e))}"><span>Всего в договоре ${fmtN(n)} ЭО</span><b>Открыть договор${ICON.right}</b></button></div>`
+    : rowHtml(r, toks);
+}
+
+// ---------- экран договора ----------
+function renderContract(c, q0) {
+  const all = contractEos(c);
+  setBar(`<button class="ib" id="back" aria-label="Назад">${ICON.back}</button><div class="t">Договор</div>`);
+  $('#back').onclick = () => (history.length > 1 ? history.back() : go('#/'));
+  if (!all.length) { $('#view').innerHTML = '<div class="empty">Такой договор не найден в текущей базе.</div>'; return; }
+  const e0 = all[0];
+  const pu = all.reduce((s, e) => s + e.meters.length, 0);
+  $('#view').innerHTML = `<div class="head"><div class="name">${esc(e0.name)}</div>
+      <div class="meta">Договор ${esc(e0.contract || '—')}${e0.inn ? '<br>ИНН ' + esc(e0.inn) : ''}<br>${fmtN(all.length)} ЭО · ${fmtN(pu)} ПУ</div>
+      ${X.hasCoordCols ? `<button class="onmap" id="cMap">${ICON.map}Все ЭО договора на карте</button>` : ''}</div>
+    <label class="search compact" id="cbox" style="margin-top:12px">${ICON.search}<input id="cq" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" placeholder="Найти в договоре: ЭО, адрес, счётчик"><button class="clear" id="cclr" aria-label="Очистить">${ICON.close}</button></label>
+    <div id="clist"></div>`;
+  if ($('#cMap')) $('#cMap').onclick = () => go('#/map/c/' + encodeURIComponent(c));
+  const LIM = 30;
+  let hits = all, shownC = 0, toks = [];
+  const more = () => {
+    const box = $('#cmore'); if (box) box.remove();
+    const slice = hits.slice(shownC, shownC + LIM);
+    $('#clistL').insertAdjacentHTML('beforeend', slice.map(e => eoMiniHtml(e, toks)).join(''));
+    shownC += slice.length;
+    const left = hits.length - shownC;
+    if (left > 0) {
+      $('#clist').insertAdjacentHTML('beforeend', `<button class="more" id="cmore">Показать ещё ${fmtN(Math.min(LIM, left))} из ${fmtN(left)}</button>`);
+      $('#cmore').onclick = more;
+    }
+    $('#clistL').querySelectorAll('[data-id]:not([data-bound])').forEach(b => {
+      b.dataset.bound = 1;
+      b.onclick = () => { sessionStorage.setItem('cscroll:' + c, String(window.scrollY)); sessionStorage.setItem('cshown:' + c, String(shownC)); go('#/eo/' + encodeURIComponent(b.dataset.id)); };
+    });
+  };
+  const draw = (q, restoreN) => {
+    toks = tokensOf(q);
+    if (q.trim()) { const ids = new Set(search(q, all).map(r => r.e.id)); hits = all.filter(e => ids.has(e.id)); }
+    else hits = all;
+    $('#cbox').classList.toggle('has', !!q.trim());
+    $('#clist').innerHTML = `<div class="count">${q.trim() ? `Найдено ${fmtN(hits.length)} из ${fmtN(all.length)} ЭО` : `Все ЭО договора: ${fmtN(all.length)}`}</div>
+      ${hits.length ? '<div class="list" id="clistL"></div>' : '<div class="empty">В этом договоре ничего не нашлось.</div>'}`;
+    shownC = 0;
+    if (hits.length) { more(); while (restoreN && shownC < restoreN && shownC < hits.length) more(); }
+  };
+  const inp = $('#cq');
+  inp.value = q0 || '';
+  let tmr;
+  // запрос внутри договора храним в адресе — «назад» из карточки ЭО вернёт тот же список
+  const keep = v => history.replaceState(null, '', '#/c/' + encodeURIComponent(c) + (v.trim() ? '?q=' + encodeURIComponent(v) : ''));
+  inp.oninput = () => { clearTimeout(tmr); tmr = setTimeout(() => { keep(inp.value); draw(inp.value); }, 150); };
+  inp.onkeydown = ev => { if (ev.key === 'Enter') inp.blur(); };
+  $('#cclr').onclick = ev => { ev.preventDefault(); inp.value = ''; keep(''); draw(''); inp.focus(); };
+  const back = +(sessionStorage.getItem('cshown:' + c) || 0);
+  draw(inp.value, back);
+  const y = +(sessionStorage.getItem('cscroll:' + c) || 0);
+  sessionStorage.removeItem('cscroll:' + c); sessionStorage.removeItem('cshown:' + c);
+  if (y) requestAnimationFrame(() => window.scrollTo(0, y)); else window.scrollTo(0, 0);
+}
+
+// Строка ЭО в списке договора: номер ЭО жирным, адрес и счётчик — серым
+function eoMiniHtml(e, toks) {
+  const nm = e.meters.length;
+  const addr = eoAddrOf(e) || 'Адрес не указан';
+  const tr = e.recvCount ? `<span class="tchip r">есть транзитоприёмники: ${e.recvCount}</span>` : e.giverList.length ? '<span class="tchip g">через транзитодателя</span>' : '';
+  const hit = toks.length === 1 && e.meters.find(m => norm(m.num).includes(toks[0]));
+  const m0 = hit || e.meters[0];
+  return `<button class="eomini" data-id="${esc(e.id)}"><div class="em1"><div class="ea">${highlight(e.id, toks)}</div>
+    ${nm ? `<span class="badge b-pu">${nm} ПУ</span>` : '<span class="badge b-x">Нет ПУ</span>'}</div>
+    <div class="meta">${highlight(addr, toks)}${m0 ? '<br>№ ' + highlight(m0.num, toks) + (nm > 1 ? ' и ещё ' + (nm - 1) : '') : ''}</div>${tr}</button>`;
 }
 
 function rememberQuery(q) {
@@ -886,10 +1022,15 @@ function route() {
   if (!M || h.startsWith('#/data')) { leaveMaps(); return renderData(); }
   if (h.startsWith('#/map/eo/')) return enterContractsMap(decodeURIComponent(h.slice(9)));
   if (h.startsWith('#/map/fix/')) return enterContractsMap(decodeURIComponent(h.slice(10)), 'fix');
+  if (h.startsWith('#/map/c/')) return enterContractsMap(decodeURIComponent(h.slice(8)), 'contract');
   if (h === '#/map') return enterContractsMap(null);
   if (h.startsWith('#/subs')) return enterSubsMap();
   if (h.startsWith('#/nocoords')) return renderNoCoords();
   if (h.startsWith('#/eo/')) return renderCard(decodeURIComponent(h.slice(5)));
+  if (h.startsWith('#/c/')) {
+    const [p, qs] = h.slice(4).split('?q=');
+    return renderContract(decodeURIComponent(p), decodeURIComponent(qs || ''));
+  }
   renderHome();
 }
 window.addEventListener('hashchange', route);
