@@ -2,7 +2,7 @@
 // Мобильный ЕБЦ: поиск, карточка ЭО, транзит, загрузка базы. Карты — в maps.js.
 
 const CFG = Object.assign({ yandexFolderUrl: '', staleDays: 35 }, window.APP_CONFIG || {});
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 const PAGE = 50;
 
 // ---------- мелкие помощники ----------
@@ -54,7 +54,8 @@ const idb = {
   },
   get(k) { return this.tx('readonly', s => s.get(k)); },
   set(k, v) { return this.tx('readwrite', s => s.put(v, k)); },
-  del(k) { return this.tx('readwrite', s => s.delete(k)); }
+  del(k) { return this.tx('readwrite', s => s.delete(k)); },
+  delRange(lo, hi) { return this.tx('readwrite', s => s.delete(IDBKeyRange.bound(lo, hi))); }
 };
 const ls = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -89,6 +90,7 @@ let X = null;   // индекс: ЭО, транзитные связи, поис
 let SUBS = null; // подстанции из .geojson (хранятся отдельно: новая база без подстанций их не стирает)
 let FIXES = {};  // уточнения координат, сделанные на этом телефоне: ЭО → {lat, lon, ts, how, acc, sent}
 let FIX_VER = 0; // растёт при каждом изменении уточнений — карта перестраивается
+let FIX_ACC = []; // ваши уточнения, которые уже приняты в базу: [{id, ts, at}]
 
 // Точка ЭО на карте: своё уточнение (на проверке) важнее координат из базы.
 function eoLL(e) { return e.fix ? [e.fix.lat, e.fix.lon] : e.lat != null ? [e.lat, e.lon] : null; }
@@ -570,6 +572,7 @@ function field(label, value, wide) {
 
 function renderCard(id) {
   const e = X.byId.get(id);
+  if (!window._cardHist || window._cardHist.id !== id) window._cardHist = null;
   setBar(`<button class="ib" id="back" aria-label="Назад">${ICON.back}</button><div class="t">Карточка ЭО</div>`);
   $('#back').onclick = () => (history.length > 1 ? history.back() : go('#/'));
   if (!e) { $('#view').innerHTML = '<div class="empty">Такой ЭО не найден в текущей базе.</div>'; return; }
@@ -609,6 +612,7 @@ function renderCard(id) {
       <div class="meta">Договор ${esc(e.contract || '—')}<br>ЭО ${esc(e.id)}${e.inn ? '<br>ИНН ' + esc(e.inn) : ''}</div>
       ${transitBlocks(e)}
     </div>
+    <div id="histmini"></div>
     ${acc('Договор и потребитель', kv(secHtml.contract))}
     ${acc('Энергообъект', kv(secHtml.object), true)}
     ${trRows.length
@@ -616,6 +620,7 @@ function renderCard(id) {
         acc(`ПУ транзитоприёмников (${trRows.length})`, '<div id="trmeters"></div>', false)
       : acc(`Приборы учёта (${e.rows.length})`, '<div id="meters"></div>', true)}
     ${acc('Точка поставки и сеть', kv(secHtml.net))}
+    <div id="histlink"></div>
   `;
   // У транзитодателя свои (расчётные) ПУ — развёрнуты, транзитные — в отдельном свёрнутом аккордеоне.
   if (trRows.length) {
@@ -623,6 +628,7 @@ function renderCard(id) {
     renderMeters('#trmeters', e, trRows, 10);
   } else renderMeters('#meters', e, e.rows, 10);
   bindCard(e);
+  decorateCard(e);
   if ($('#onMap')) $('#onMap').onclick = () => go('#/map/eo/' + encodeURIComponent(e.id));
   $('#fixBtn').onclick = () => openFixChooser(e);
   if ($('#fixDel')) $('#fixDel').onclick = async () => {
@@ -691,12 +697,13 @@ function renderMeters(sel, e, list, limit, emptyText) {
         : '<div class="note">Транзитоприёмник не найден в этой базе</div>').join('');
     }
     const title = num ? '№ ' + num : (r[M.f.meter] || 'Без прибора учёта');
-    return `<div class="pucard"><div class="r1"><span class="pu-title" data-copy="${esc(num)}">${esc(title)}</span>${num ? roleBadge(role) : ''}</div>
+    return `<div class="pucard"${num ? ` data-pu="${esc(num)}|${role}"` : ''}><div class="r1"><span class="pu-title" data-copy="${esc(num)}">${esc(title)}</span>${num ? roleBadge(role) : ''}</div>
       ${note}<div class="kv grid2">${fs.join('')}</div></div>`;
   }).join('');
   const left = list.length - limit;
   box.innerHTML = cards + (left > 0 ? `<div style="padding:0 14px 12px"><button class="more" style="margin-top:0">Показать все приборы (${list.length})</button></div>` : '');
   if (left > 0) box.querySelector('.more').onclick = () => renderMeters(sel, e, list, list.length, emptyText);
+  box.querySelectorAll('.pucard[data-pu]').forEach(c => decoratePu(c, e));
   bindGo(box); bindCopy(box);
 }
 
@@ -756,11 +763,14 @@ function renderData() {
   $('#view').innerHTML = `
     ${hasDb ? `<div class="card"><h2>Загруженная база</h2>
       <div class="stat"><span>Файл</span><b>${esc(m.fileName)}</b></div>
-      ${m.period ? `<div class="stat"><span>Период</span><b>${esc(fmtPeriod(m.period))}</b></div>` : ''}
+      ${H ? `<div class="stat"><span>Архив</span><b class="or">${fmtN(H.months.length)} мес. · ${esc(mShort(H.months[0]))} — ${esc(mShort(H.last))}</b></div>` : ''}
+      ${H || m.period ? `<div class="stat"><span>Последний месяц</span><b>${esc(H ? mFull(H.last).toLowerCase() : fmtPeriod(m.period))}</b></div>` : ''}
       <div class="stat"><span>Загружена</span><b>${esc(fmtDate(m.loadedAt))}</b></div>
       <div class="stat"><span>Энергообъектов</span><b>${fmtN(m.eo)}</b></div>
+      <div class="stat"><span>Приборов учёта</span><b>${fmtN(X.eos.reduce((n, e) => n + e.meters.length, 0))}</b></div>
       <div class="stat"><span>Строк</span><b>${fmtN(m.rows)}</b></div>
       <div class="stat"><span>Транзитных связей</span><b>${fmtN(X.links)}</b></div>
+      ${X.hasCoordCols ? `<div class="stat"><span>Ручных точек всего</span><b>${fmtN(X.eos.reduce((n, e) => n + (e.manual ? 1 : 0), 0))}</b></div>` : ''}
       ${X.hasCoordCols ? `<div class="stat"><span>ЭО на карте</span><b>${fmtN(X.withCoords)}</b></div>` : '<div class="stat"><span>ЭО на карте</span><b>нет координат<small>загрузите архив из геокодера</small></b></div>'}
       <div class="stat"><span>Подстанций</span><b>${SUBS ? fmtN(SUBS.items.length) + `<small>ПЦ ${fmtN(SUBS.counts.pc)} · сети ${fmtN(SUBS.counts.net)} · частных ${fmtN(SUBS.counts.priv)}</small>` : 'нет'}</b></div></div>`
       : `<div class="hello">Данные<br>не загружены</div>
@@ -769,6 +779,7 @@ function renderData() {
         <li>Вернитесь сюда и нажмите «Загрузить файл».</li>
         <li>Выберите скачанный архив и введите пароль.</li></ol>
         <p style="margin-top:8px">Файл обрабатывается только на этом устройстве и никуда не отправляется.</p></div>`}
+    ${hasDb ? changesCardHtml() + fixesCardHtml() : ''}
     <div class="card">
       <h2>${hasDb ? 'Обновить базу' : 'Загрузка'}</h2>
       <button class="btn primary" id="yd"${yd ? '' : ' disabled'}>${ICON.down}Скачать с Яндекс Диска</button>
@@ -776,7 +787,6 @@ function renderData() {
       <button class="btn secondary" id="pick">${ICON.file}Загрузить файл (.zip или .csv)</button>
       <div id="prog"></div>
     </div>
-    ${hasDb ? fixesCardHtml() : ''}
     ${ls.get('pw', null) ? `<div class="card"><div class="stat"><span>Пароль от архива сохранён на этом устройстве</span></div><button class="btn danger" id="forget">Забыть пароль</button></div>` : ''}
     ${hasDb ? '<button class="btn danger" id="wipe">Удалить базу с устройства</button>' : ''}
     <button class="btn secondary" id="upd">Обновить приложение</button>
@@ -784,13 +794,20 @@ function renderData() {
   if (yd) $('#yd').onclick = () => window.open(yd, '_blank', 'noopener');
   $('#pick').onclick = () => $('#file').click();
   $('#upd').onclick = updateApp;
+  bindChanges();
   if ($('#fxSend')) $('#fxSend').onclick = sendFixes;
+  document.querySelectorAll('[data-fx]').forEach(b => b.onclick = () => {
+    const box = $('#fxList'), k = b.dataset.fx;
+    const open = box.dataset.k === k && !box.hidden;
+    box.hidden = open; box.dataset.k = k;
+    if (!open) { box.innerHTML = fixesListHtml(k); box.querySelectorAll('[data-go]').forEach(x => x.onclick = () => go('#/eo/' + encodeURIComponent(x.dataset.go))); }
+  });
   if ($('#fxName')) $('#fxName').onclick = async () => { const n = await askName(true); if (n) renderData(); };
-  document.querySelectorAll('#fxList [data-go]').forEach(b => b.onclick = () => go('#/eo/' + encodeURIComponent(b.dataset.go)));
   if ($('#forget')) $('#forget').onclick = () => { ls.del('pw'); toast('Пароль удалён с устройства'); renderData(); };
   if ($('#wipe')) $('#wipe').onclick = async () => {
     if (!confirm('Удалить базу с этого устройства? Её можно будет загрузить заново.')) return;
-    await idb.del('db'); await idb.del('subs'); M = null; X = null; SUBS = null; ls.del('recent'); toast('База удалена'); go('#/data'); renderData();
+    await idb.del('db'); await idb.del('subs'); await idb.del('hmeta'); await idb.delRange('h:', 'h:\uffff');
+    M = null; X = null; SUBS = null; H = null; HC.clear(); ls.del('recent'); toast('База удалена'); go('#/data'); renderData();
   };
 }
 
@@ -847,9 +864,10 @@ function loadFile(file) {
       }
       if (typed) { if (typed.remember) ls.set('pw', typed.password); else ls.del('pw'); }
       M = JSON.parse(data.json); X = makeIndex(M);
+      H = data.hist ? JSON.parse(data.hist) : null; HC.clear(); window._cardHist = null;
       const acceptedFixes = await pruneAcceptedFixes();
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-      toast(`База загружена: ${fmtN(M.meta.eo)} ЭО` + (data.subs ? `, подстанций ${fmtN(SUBS.items.length)}` : SUBS ? ' (подстанции — из прошлой загрузки)' : '')
+      toast(`База загружена: ${fmtN(M.meta.eo)} ЭО` + (H ? `, история ${H.months.length} ${plural(H.months.length, 'месяц', 'месяца', 'месяцев')}` : '') + (data.subs ? `, подстанций ${fmtN(SUBS.items.length)}` : SUBS ? ' (подстанции — из прошлой загрузки)' : '')
         + (acceptedFixes ? `. Ваших уточнений принято: ${acceptedFixes}` : ''), 4000);
       go('#/');
     }
@@ -899,8 +917,14 @@ async function pruneAcceptedFixes() {
   let n = 0;
   for (const id of Object.keys(FIXES)) {
     const e = X.byId.get(id), f = FIXES[id];
-    if (e && e.manual && e.lat != null && distM([e.lat, e.lon], [f.lat, f.lon]) < 15) { delete FIXES[id]; n++; }
+    if (e && e.manual && e.lat != null && distM([e.lat, e.lon], [f.lat, f.lon]) < 15) {
+      FIX_ACC = FIX_ACC.filter(x => x.id !== id);
+      FIX_ACC.unshift({ id, ts: f.ts, at: Date.now() });
+      delete FIXES[id]; n++;
+    }
   }
+  FIX_ACC = FIX_ACC.slice(0, 300);
+  if (n) await idb.set('fixacc', JSON.stringify(FIX_ACC));
   await saveFixes();
   return n;
 }
@@ -959,21 +983,31 @@ function openFixChooser(e) {
   };
 }
 
+function fixesListHtml(kind) {
+  const items = kind === 'acc'
+    ? FIX_ACC.map(x => ({ id: x.id, sub: 'принято ' + fmtDay(x.at) }))
+    : Object.keys(FIXES).filter(id => (kind === 'sent') === !!FIXES[id].sent)
+      .map(id => ({ id, sub: fmtDay(FIXES[id].ts) + ' · ' + (FIXES[id].how === 'gps' ? 'GPS' : 'на карте') }));
+  if (!items.length) return '<p class="meta" style="padding:8px 0">Пусто.</p>';
+  return items.slice(0, 50).map(({ id, sub }) => {
+    const e = X.byId.get(id);
+    return `<button class="link" data-go="${esc(id)}"><div><div class="name" style="font-size:14px">${esc(e ? e.name : 'ЭО ' + id)}</div>
+      <div class="meta">ЭО ${esc(id)} · ${esc(sub)}</div></div>${ICON.right}</button>`;
+  }).join('') + (items.length > 50 ? `<p class="meta">и ещё ${items.length - 50}</p>` : '');
+}
+
 function fixesCardHtml() {
   const ids = Object.keys(FIXES);
-  const unsent = ids.filter(id => !FIXES[id].sent).length;
+  const unsent = ids.filter(id => !FIXES[id].sent).length, sent = ids.length - unsent;
   const name = ls.get('inspector', '');
-  const list = ids.slice(0, 20).map(id => {
-    const e = X.byId.get(id), f = FIXES[id];
-    return `<button class="link" data-go="${esc(id)}"><div><div class="name" style="font-size:14px">${esc(e ? e.name : 'ЭО ' + id)}</div>
-      <div class="meta">ЭО ${esc(id)} · ${esc(fmtDay(f.ts))} · ${f.how === 'gps' ? 'GPS' : 'на карте'}${f.sent ? ' · отправлено' : ''}</div></div>${ICON.right}</button>`;
-  }).join('');
-  return `<div class="card"><h2>Уточнения координат</h2>
-    <div class="stat"><span>На проверке</span><b>${fmtN(ids.length)}${ids.length ? `<small>не отправлено: ${fmtN(unsent)}</small>` : ''}</b></div>
-    <div class="stat"><span>Ваше имя</span><b>${name ? esc(name) : 'не указано'} <button class="linkbtn" id="fxName">изменить</button></b></div>
-    ${ids.length ? `<div id="fxList">${list}${ids.length > 20 ? `<p class="meta">и ещё ${ids.length - 20}</p>` : ''}</div>` : '<p class="meta">Уточнить точку можно в карточке ЭО: «Уточнить местоположение».</p>'}
-    <button class="btn primary" id="fxSend"${ids.length ? '' : ' disabled'}>${ICON.share}Отправить уточнения</button>
-    <p class="meta" style="margin-top:6px">Откроется «Поделиться» — выберите MAX и получателя. Точки появятся у всех после проверки, со следующей базой.</p></div>`;
+  return `<div class="card"><h2>Мои уточнения координат</h2>
+    <button class="srow2" data-fx="unsent"><span>Не отправлено</span><span><b class="or">${fmtN(unsent)}</b>${ICON.right}</span></button>
+    <button class="srow2" data-fx="sent"><span>Отправлено, ждут проверки</span><span><b>${fmtN(sent)}</b>${ICON.right}</span></button>
+    <button class="srow2" data-fx="acc"><span>Приняты в базу</span><span><b class="gr">${fmtN(FIX_ACC.length)}</b>${ICON.right}</span></button>
+    <div id="fxList" hidden></div>
+    <div class="stat" style="border-top:1px solid var(--line);margin-top:2px"><span>Ваше имя</span><b>${name ? esc(name) : 'не указано'} <button class="linkbtn" id="fxName">изменить</button></b></div>
+    <button class="btn orange" id="fxSend"${ids.length ? '' : ' disabled'}>${ICON.share}Отправить в MAX</button>
+    <p class="meta" style="margin-top:6px">${ids.length ? 'Откроется «Поделиться» — выберите MAX и получателя.' : 'Уточнить точку можно в карточке ЭО: «Уточнить местоположение».'} Принятые точки придут всем со следующей базой.</p></div>`;
 }
 
 // Файл уточнений — CSV (Chrome разрешает отправлять через «Поделиться» только некоторые типы файлов, .json среди них нет).
@@ -1026,7 +1060,15 @@ function route() {
   if (h === '#/map') return enterContractsMap(null);
   if (h.startsWith('#/subs')) return enterSubsMap();
   if (h.startsWith('#/nocoords')) return renderNoCoords();
-  if (h.startsWith('#/eo/')) return renderCard(decodeURIComponent(h.slice(5)));
+  if (h.startsWith('#/changes/')) return renderChanges(h.slice(10));
+  if (h.startsWith('#/eo/')) {
+    const [rawId, sub, key] = h.slice(5).split('/');
+    const id = decodeURIComponent(rawId);
+    if (sub === 'chart') return renderEoChart(id);
+    if (sub === 'pu' && key) return renderPuChart(id, key);
+    if (sub === 'hist') return renderEoHist(id);
+    return renderCard(id);
+  }
   if (h.startsWith('#/c/')) {
     const [p, qs] = h.slice(4).split('?q=');
     return renderContract(decodeURIComponent(p), decodeURIComponent(qs || ''));
@@ -1043,6 +1085,9 @@ window.addEventListener('hashchange', route);
     if (sj) SUBS = JSON.parse(sj);
     const fj = await idb.get('fixes');
     if (fj) { FIXES = JSON.parse(fj) || {}; if (X) applyFixes(); }
+    const aj = await idb.get('fixacc');
+    if (aj) FIX_ACC = JSON.parse(aj) || [];
+    await loadHistMeta();
   } catch (err) { console.error(err); }
   route();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {

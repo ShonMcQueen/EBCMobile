@@ -260,6 +260,83 @@ details.acc[open]>summary svg{transform:rotate(180deg)}
 .steps{font-size:14px;line-height:1.55;color:var(--ink);padding-left:20px;margin-top:6px}
 .steps li{margin:3px 0}
 
+/* история по месяцам (1.9.0) */
+.appbar .t small.tsub{display:block;font-size:12.5px;font-weight:400;color:var(--muted);overflow:hidden;text-overflow:ellipsis}
+.hmini{display:block;width:100%;text-align:left;margin-top:10px;background:var(--surface);border:2px solid var(--mesorange);border-radius:14px;padding:11px 14px}
+.hmini .r1{align-items:baseline;font-size:15px}
+.hmini .meta{margin-top:5px;font-size:12.5px}
+.hbars{display:flex;align-items:flex-end;gap:3px;margin-top:8px}
+.hbars i{flex:1;background:var(--mesblue);border-radius:2px 2px 0 0;min-width:2px}
+.hbars i.nil{background:transparent}
+.hbars i.lst{background:var(--mesorange)}
+.hbars i.tr{background:#8A6400}
+.hbars i.tr.lst{background:var(--mesorange)}
+.hrow{display:flex;justify-content:space-between;align-items:center;width:100%;margin-top:10px;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:13px 14px;font-size:15px;text-align:left}
+.hrow svg{width:18px;height:18px;color:var(--muted)}
+.hpu{display:block;width:100%;margin-top:10px;padding:10px;border:1.5px solid var(--mesblue);border-radius:10px;color:var(--mesblue);font-weight:600;font-size:14px;text-align:center}
+.ytabs{display:flex;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:4px;margin-top:4px;overflow-x:auto}
+.ytabs button{flex:1;min-width:56px;min-height:40px;border-radius:9px;font-size:15px}
+.ytabs button.on{background:var(--mesblue);color:#fff;font-weight:700}
+.chips2{display:flex;gap:8px;margin-top:10px}
+.chips2 button{min-height:38px;padding:0 14px;border:1.5px solid var(--mesblue);border-radius:19px;color:var(--mesblue);background:var(--surface);font-size:14.5px}
+.chips2 button.on{background:var(--mesblue);color:#fff}
+.chips2.sm{margin-top:0;gap:4px}.chips2.sm button{min-height:34px;padding:0 10px;font-size:13px}
+.gcard .r1{align-items:center}
+.legend{display:flex;gap:16px;font-size:13px;color:var(--muted);margin-bottom:8px}
+.legend span{display:flex;align-items:center;gap:6px}
+.legend i{width:12px;height:12px;border-radius:3px}.legend .lc{background:var(--mesblue)}.legend .lp{background:#B9C3D0}
+.gchart{display:flex;align-items:flex-end;gap:3px;border-bottom:1px solid #B9C3D0}
+.gcol{flex:1;height:100%;display:flex;align-items:flex-end;gap:1px;padding:0;border-radius:4px 4px 0 0}
+.gcol.sel{background:#EEF2F8}
+.gcol i{flex:1;border-radius:2px 2px 0 0}
+.gcol .gp{background:#B9C3D0}.gcol .gc{background:var(--mesblue)}.gcol .gc.lst{background:var(--mesorange)}
+.glabels{display:grid;grid-template-columns:repeat(12,1fr);font-size:11.5px;color:var(--muted);text-align:center;margin-top:4px}
+.glabels.sm{font-size:10.5px;margin-top:2px}
+.ylab{position:relative;height:16px;margin-top:4px;font-size:11.5px;color:var(--muted)}
+.ylab span{position:absolute;top:0;white-space:nowrap}
+.gsel{margin-top:8px;font-size:14px}
+.gnote{font-size:12.5px!important;color:var(--muted);line-height:1.45;margin-top:8px}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.tile span{display:block;font-size:12.5px;color:var(--muted)}
+.tile b{display:block;font-size:18px;margin-top:2px}
+b.or,.tile b.or{color:var(--mesorange)}
+b.gr,.tile b.gr,.tr .gr{color:var(--green)}
+.tile b.rd,.tr .rd{color:var(--recvink)}
+.htable{padding:4px 14px 8px}
+.htable h2{margin:10px 0 2px}
+.htable .tr{display:grid;grid-template-columns:1.3fr 1fr 1fr;padding:10px 0;border-top:1px solid var(--line);font-size:15px}
+.htable .tr span+span{text-align:right}
+.htable .tr.th{font-size:12.5px;color:var(--muted);border-top:0}
+.htable.pu4 .tr{grid-template-columns:1fr 1fr 1fr 1fr;font-size:14px}
+.htable .tr small{grid-column:1/-1;font-size:12px;color:var(--muted);margin-top:2px}
+.htable .more{margin:8px 0 6px}
+.hpucard{display:block;width:100%;text-align:left;margin-top:10px;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px 13px}
+.hpucard .meta{font-size:12.5px}
+.hpucard .r1.meta{margin-top:6px}
+.hnote{margin-top:8px;background:#FFF1E6;border:1px solid var(--recvline);color:var(--recvink);border-radius:12px;padding:10px 12px;font-size:14px;line-height:1.4}
+.hnote .linkbtn{padding:0;margin-left:4px}
+.tl{margin-top:6px}
+.tli{display:flex;gap:12px}
+.tli>.tld{flex:none;width:14px;height:14px;border-radius:50%;margin-top:4px;position:relative}
+.tli:not(:last-child)>.tld::after{content:"";position:absolute;left:6px;top:16px;width:2px;height:calc(100% + 60px);background:#C9D1D9}
+.tli{position:relative;overflow:hidden}
+.tld.or{background:var(--mesorange)}.tld.bl{background:var(--mesblue)}.tld.gy{background:#B9C3D0}
+.tlb{flex:1;min-width:0;padding-bottom:14px}
+.tlb>.meta{margin:0 0 4px}
+.tlc{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.tlc .st{font-size:15px}
+.tlx{font-size:14px;margin-top:3px;line-height:1.4;word-break:break-word}
+.card.hl{border:2px solid var(--mesorange)}
+.card .r1 h2{margin-bottom:4px}
+.srow2{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;min-height:44px;padding:6px 0;border-top:1px dashed var(--line);font-size:14.5px;text-align:left}
+.srow2>span:first-child{color:var(--muted)}
+.srow2>span:last-child{display:flex;align-items:center;gap:8px}
+.srow2 svg{width:16px;height:16px;color:#B0BAC4}
+#fxList{border-top:1px dashed var(--line);padding-top:2px}
+#fxList .link{border-top-color:var(--line)}
+.btn.orange{background:var(--mesorange);color:#fff}
+
 /* всплывашки */
 .toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ink);color:#fff;font-size:14px;padding:10px 16px;border-radius:22px;max-width:calc(100% - 32px);z-index:20;box-shadow:0 6px 20px rgba(0,0,0,.2)}
 .modal{position:fixed;inset:0;background:rgba(27,42,58,.45);display:flex;align-items:flex-end;justify-content:center;z-index:30}
@@ -315,6 +392,7 @@ body.home-idle .mapbtns{margin-top:28px}
 <script src="leaflet.js"></script>
 <script src="leaflet.markercluster.js"></script>
 <script src="maps.js"></script>
+<script src="history.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -15,16 +15,17 @@ onmessage = async e => {
     const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
     const isZip = head[0] === 0x50 && head[1] === 0x4b && head[2] === 3 && head[3] === 4;
 
-    let subs = null;
+    let subs = null, histText = null;
     if (isZip) {
       const reader = new zip.ZipReader(new zip.BlobReader(file));
       const all = (await reader.getEntries()).filter(en => !en.directory);
       const entries = all.filter(en => /\.csv$/i.test(en.filename));
       const geos = all.filter(en => /\.geojson$/i.test(en.filename));
+      const hist = all.find(en => /\.ebch$/i.test(en.filename));     // история по месяцам из геокодера 1.2
       if (!entries.length) { await reader.close(); throw userError('В архиве нет CSV-файла.'); }
       entries.sort((a, b) => b.uncompressedSize - a.uncompressedSize);
       const entry = entries[0];
-      if ((entry.encrypted || geos.some(g => g.encrypted)) && !password) { await reader.close(); post('need-password'); return; }
+      if ((entry.encrypted || geos.some(g => g.encrypted) || (hist && hist.encrypted)) && !password) { await reader.close(); post('need-password'); return; }
       try {
         bytes = await entry.getData(new zip.Uint8ArrayWriter(), {
           password: password || undefined,
@@ -38,6 +39,10 @@ onmessage = async e => {
             files.push({ name: g.filename.split('/').pop(), text: decode(b) });
           }
           subs = buildSubs(files);
+        }
+        if (hist) {
+          post('progress', { stage: 'Распаковываю историю', pct: 31 });
+          histText = decode(await hist.getData(new zip.Uint8ArrayWriter(), { password: password || undefined }));
         }
       } catch (err) {
         await reader.close();
@@ -56,12 +61,63 @@ onmessage = async e => {
 
     const model = buildModel(text, name, p => post('progress', { stage: 'Разбираю строки', pct: 32 + Math.round(p * 58) }));
     text = null;
+    const histMeta = await saveHistory(histText, p => post('progress', { stage: 'Сохраняю историю', pct: 90 + Math.round(p * 3) }));
+    histText = null;
     post('progress', { stage: 'Сохраняю на телефоне', pct: 93 });
-    post('done', { json: JSON.stringify(model), meta: model.meta, subs: subs ? JSON.stringify(subs) : null });
+    post('done', { json: JSON.stringify(model), meta: model.meta, subs: subs ? JSON.stringify(subs) : null, hist: histMeta });
   } catch (err) {
     post('error', { message: err.user ? err.message : 'Не удалось обработать файл: ' + (err.message || err) });
   }
 };
+
+// ---------------------------------------------------------------- история по месяцам
+// Пишем прямо в хранилище телефона: «hmeta» — общие сведения, «h:<ЭО>» — строка по каждому ЭО.
+// Старая история удаляется всегда: если в новом архиве её нет, графики просто не показываются.
+function openDb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('mobile-ebc', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+function txDone(t) { return new Promise((res, rej) => { t.oncomplete = res; t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); }); }
+
+async function saveHistory(text, onProgress) {
+  const db = await openDb();
+  let t = db.transaction('kv', 'readwrite');
+  t.objectStore('kv').delete(IDBKeyRange.bound('h:', 'h:\uffff'));
+  t.objectStore('kv').delete('hmeta');
+  await txDone(t);
+  if (!text) { db.close(); return null; }
+  const nl = text.indexOf('\n');
+  let meta;
+  try { meta = JSON.parse(text.slice(0, nl)); } catch { db.close(); return null; }
+  if (!meta || meta.v !== 1) { db.close(); return null; }
+  const re = /^\{"e":"([^"]+)"/;
+  let pos = nl + 1, n = 0;
+  const total = text.length;
+  while (pos < total) {
+    t = db.transaction('kv', 'readwrite');
+    const st = t.objectStore('kv');
+    for (let k = 0; k < 2000 && pos < total; k++) {
+      let end = text.indexOf('\n', pos);
+      if (end < 0) end = total;
+      const line = text.slice(pos, end);
+      pos = end + 1;
+      const m = re.exec(line);
+      if (m) { st.put(line, 'h:' + m[1]); n++; }
+    }
+    await txDone(t);
+    onProgress(pos / total);
+  }
+  const ms = JSON.stringify(meta);
+  t = db.transaction('kv', 'readwrite');
+  t.objectStore('kv').put(ms, 'hmeta');
+  await txDone(t);
+  db.close();
+  return ms;
+}
 
 // UTF-8, а если файл сохранён в старой кодировке Windows — cp1251.
 function decode(bytes) {
